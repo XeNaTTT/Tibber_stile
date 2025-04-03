@@ -255,12 +255,19 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     # --- Linkes Panel (Preis heute) ---
     times_left = []
     values_left = []
-    if left_type == "price":
+    if left_type == "combo":
+        # Bei "combo" erwarten wir, dass left_data ein Dictionary mit Schluesseln "price" und "consumption" ist.
+        for slot in left_data["price"]:
+            dt_obj = datetime.datetime.fromisoformat(slot['startsAt'])
+            times_left.append(dt_obj)
+            values_left.append(slot['total'] * 100.0)
+    elif left_type == "price":
         for slot in left_data:
             dt_obj = datetime.datetime.fromisoformat(slot['startsAt'])
             times_left.append(dt_obj)
             values_left.append(slot['total'] * 100.0)
     else:
+        # left_type == "consumption"
         for slot in left_data:
             dt_obj = datetime.datetime.fromisoformat(slot['from'])
             times_left.append(dt_obj)
@@ -339,7 +346,8 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     draw.text((x_low_left, y_low_left - 15), f"{values_left[lowest_left_index]/100:.2f}", font=fonts["small"], fill=0)
     draw.text((x_high_left, y_high_left - 15), f"{values_left[highest_left_index]/100:.2f}", font=fonts["small"], fill=0)
 
-    # Marker: Im Future-Modus erscheint der Marker im linken Panel, im Historical-Modus im rechten Panel.
+    # Marker: Im Future-Modus wird der aktuelle Marker im linken Panel gezeichnet,
+    # im Historical-Modus soll der Marker im rechten Panel erscheinen.
     if mode == "future":
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         current_idx_left = min(range(n_left), key=lambda i: abs((times_left[i] - now_utc).total_seconds()))
@@ -350,6 +358,7 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
                       x_marker_left + marker_radius, y_marker_left + marker_radius), fill=0)
         draw.text((x_marker_left - 35, y_marker_left - 10),
                   f"{values_left[current_idx_left]/100:.2f}", font=fonts["small"], fill=0)
+
     # --- Rechtes Panel (Preis morgen) ---
     x_positions_right = []
     for i in range(n_right):
@@ -383,7 +392,7 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
         if i % 2 == 0:
             draw.text((x_pos, chart_y_bottom + 5), times_right[i].strftime("%Hh"), font=fonts["small"], fill=0)
 
-    # Im Historical-Modus soll der aktuelle Marker im rechten Panel erscheinen.
+    # Im Historical-Modus: Marker fuer aktuellen Preis im rechten Panel
     if mode == "historical":
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         current_idx_right = min(range(n_right), key=lambda i: abs((times_right[i] - now_utc).total_seconds()))
