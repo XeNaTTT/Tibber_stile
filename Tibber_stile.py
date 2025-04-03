@@ -255,24 +255,16 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     # --- Linkes Panel (Preis heute) ---
     times_left = []
     values_left = []
-        if left_type == "combo":
-        # left_data ist ein Dictionary mit "price" und "consumption"
-        for slot in left_data["price"]:
-            dt_obj = datetime.datetime.fromisoformat(slot['startsAt'])
-            times_left.append(dt_obj)
-            values_left.append(slot['total'] * 100.0)
-    elif left_type == "price":
+    if left_type == "price":
         for slot in left_data:
             dt_obj = datetime.datetime.fromisoformat(slot['startsAt'])
             times_left.append(dt_obj)
             values_left.append(slot['total'] * 100.0)
     else:
-        # left_type == "consumption"
         for slot in left_data:
             dt_obj = datetime.datetime.fromisoformat(slot['from'])
             times_left.append(dt_obj)
             values_left.append(slot['consumption'])
-
     n_left = len(values_left)
 
     # --- Rechtes Panel (Preis morgen) ---
@@ -347,8 +339,7 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     draw.text((x_low_left, y_low_left - 15), f"{values_left[lowest_left_index]/100:.2f}", font=fonts["small"], fill=0)
     draw.text((x_high_left, y_high_left - 15), f"{values_left[highest_left_index]/100:.2f}", font=fonts["small"], fill=0)
 
-    # Marker fuer aktuellen Preis im linken Panel (Future-Modus) oder 
-    # im Historical-Modus soll der Marker im rechten Panel erscheinen.
+    # Marker: Im Future-Modus erscheint der Marker im linken Panel, im Historical-Modus im rechten Panel.
     if mode == "future":
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         current_idx_left = min(range(n_left), key=lambda i: abs((times_left[i] - now_utc).total_seconds()))
@@ -359,15 +350,12 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
                       x_marker_left + marker_radius, y_marker_left + marker_radius), fill=0)
         draw.text((x_marker_left - 35, y_marker_left - 10),
                   f"{values_left[current_idx_left]/100:.2f}", font=fonts["small"], fill=0)
-
     # --- Rechtes Panel (Preis morgen) ---
-    # Gemeinsame Skala wird verwendet; keine eigene Y-Achse
     x_positions_right = []
     for i in range(n_right):
-        x = chart_x_start + panel_width + i * (panel_width / n_right) + (panel_width / n_right)/2
+        x = chart_x_start + panel_width + i * (panel_width / n_right) + (panel_width / n_right) / 2
         x_positions_right.append(x)
 
-    # Zeichne Step-Chart rechts (Preis morgen) – keine Marker, außer im Historical-Modus
     for i in range(n_right - 1):
         x1 = x_positions_right[i]
         x2 = x_positions_right[i+1]
@@ -386,7 +374,16 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     draw.text((x_low_right, y_low_right - 15), f"{values_right[lowest_right_index]/100:.2f}", font=fonts["small"], fill=0)
     draw.text((x_high_right, y_high_right - 15), f"{values_right[highest_right_index]/100:.2f}", font=fonts["small"], fill=0)
 
-    # Marker fuer aktuellen Preis im rechten Panel im Historical-Modus
+    # Gestrichelte Linien und Stundenbeschriftung im rechten Panel (jede 2. Stunde)
+    for i in range(n_right):
+        x_pos = x_positions_right[i]
+        y_val = chart_y_bottom - (values_right[i] - right_min) * scale_y_right
+        if y_val < chart_y_bottom:
+            draw_dashed_line(draw, x_pos, chart_y_bottom, x_pos, y_val, fill=0, width=1, dash_length=2, gap_length=2)
+        if i % 2 == 0:
+            draw.text((x_pos, chart_y_bottom + 5), times_right[i].strftime("%Hh"), font=fonts["small"], fill=0)
+
+    # Im Historical-Modus soll der aktuelle Marker im rechten Panel erscheinen.
     if mode == "historical":
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         current_idx_right = min(range(n_right), key=lambda i: abs((times_right[i] - now_utc).total_seconds()))
@@ -397,17 +394,6 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
                       x_marker_right + marker_radius, y_marker_right + marker_radius), fill=0)
         draw.text((x_marker_right - 35, y_marker_right - 10),
                   f"{values_right[current_idx_right]/100:.2f}", font=fonts["small"], fill=0)
-
-    # Gestrichelte Linien und Stundenbeschriftung im rechten Panel (jede 2. Stunde)
-    for i in range(n_right):
-        x_pos = x_positions_right[i]
-        y_val = chart_y_bottom - (values_right[i] - right_min) * scale_y_right
-        if y_val < chart_y_bottom:
-            draw_dashed_line(draw, x_pos, chart_y_bottom, x_pos, y_val, fill=0, width=1, dash_length=2, gap_length=2)
-        if i % 2 == 0:
-            draw.text((x_pos, chart_y_bottom + 5), times_right[i].strftime("%Hh"), font=fonts["small"], fill=0)
-
-    # Im Future-Modus wird im rechten Panel KEIN aktueller Preismarker gezeichnet (das war schon erledigt).
 
     # Vertikaler Trenner zwischen Panels
     x_trenner = chart_x_start + panel_width
@@ -478,7 +464,7 @@ def main():
         right_type = "price"
     else:
         if cached_yesterday and cached_yesterday.get('data'):
-            # Kombiniere gestrige Preis-Daten mit Verbrauchsdaten
+            # Kombiniere gestrige Preis-Daten und Verbrauchsdaten in einem Dictionary
             consumption_data = get_consumption_data()
             filtered_consumption = filter_yesterday_consumption(consumption_data)
             left_data = {"price": cached_yesterday["data"], "consumption": filtered_consumption}
