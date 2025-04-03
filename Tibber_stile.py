@@ -255,10 +255,24 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     # --- Linkes Panel (Preis heute) ---
     times_left = []
     values_left = []
-    for slot in left_data:
-        dt_obj = datetime.datetime.fromisoformat(slot['startsAt'])
-        times_left.append(dt_obj)
-        values_left.append(slot['total'] * 100.0)
+        if left_type == "combo":
+        # left_data ist ein Dictionary mit "price" und "consumption"
+        for slot in left_data["price"]:
+            dt_obj = datetime.datetime.fromisoformat(slot['startsAt'])
+            times_left.append(dt_obj)
+            values_left.append(slot['total'] * 100.0)
+    elif left_type == "price":
+        for slot in left_data:
+            dt_obj = datetime.datetime.fromisoformat(slot['startsAt'])
+            times_left.append(dt_obj)
+            values_left.append(slot['total'] * 100.0)
+    else:
+        # left_type == "consumption"
+        for slot in left_data:
+            dt_obj = datetime.datetime.fromisoformat(slot['from'])
+            times_left.append(dt_obj)
+            values_left.append(slot['consumption'])
+
     n_left = len(values_left)
 
     # --- Rechtes Panel (Preis morgen) ---
