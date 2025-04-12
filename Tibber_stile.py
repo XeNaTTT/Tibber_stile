@@ -34,7 +34,7 @@ def load_cache(filename):
 
 def update_price_cache(price_data):
     """
-    Speichert die heutigEN Preisdaten (price_data['today']) in einem Cache.
+    Speichert die heutigen Preisdaten (price_data['today']) in einem Cache.
     Falls im Cache bereits Daten eines anderen Tages vorliegen, werden diese als
     gestrige Daten abgelegt.
     """
@@ -48,13 +48,13 @@ def update_price_cache(price_data):
 
 def get_cached_yesterday_price():
     """
-    Laedt die gestrigen Preisdaten aus dem Cache (falls vorhanden).
+    Lädt die gestrigen Preisdaten aus dem Cache (falls vorhanden).
     """
     return load_cache(CACHE_FILE_YESTERDAY)
 
 def get_price_data():
     """
-    Fragt die Tibber-API ab und gibt das price_data-Dictionary zurueck.
+    Fragt die Tibber-API ab und gibt das price_data-Dictionary zurück.
     Es werden "today" und "tomorrow" (sowie "current") abgefragt.
     """
     headers = {
@@ -82,7 +82,7 @@ def get_price_data():
 
 def get_consumption_data():
     """
-    Fragt die Tibber-API fuer Verbrauchsdaten ab (stuendlich, letzte 48 Stunden).
+    Fragt die Tibber-API für Verbrauchsdaten ab (stündlich, letzte 48 Stunden).
     Die Query wird angepasst, um die Daten aus dem 'nodes'-Feld zu holen.
     """
     headers = {
@@ -113,7 +113,7 @@ def get_consumption_data():
         print("Fehler beim Parsen der API-Antwort:", e)
         return None
     if "data" not in response_json:
-        print("Fehler in der API-Antwort, 'data'-Schluessel fehlt:", response_json)
+        print("Fehler in der API-Antwort, 'data'-Schlüssel fehlt:", response_json)
         return None
     if "errors" in response_json:
         print("API-Fehler:", response_json["errors"])
@@ -127,8 +127,8 @@ def get_consumption_data():
 
 def extract_yesterday_consumption(consumption_data):
     """
-    Berechnet aus den Verbrauchsdaten (Liste von stuendlichen Records) den
-    Gesamtverbrauch und die Gesamtkosten fuer gestern.
+    Berechnet aus den Verbrauchsdaten (Liste von stündlichen Records) den
+    Gesamtverbrauch und die Gesamtkosten für gestern.
     """
     yesterday_date = datetime.date.today() - datetime.timedelta(days=1)
     total_consumption = 0.0
@@ -142,7 +142,7 @@ def extract_yesterday_consumption(consumption_data):
 
 def filter_yesterday_consumption(consumption_data):
     """
-    Filtert aus den Verbrauchsdaten jene Records, die zu gestern gehoeren.
+    Filtert aus den Verbrauchsdaten jene Records, die zu gestern gehören.
     """
     yesterday_date = datetime.date.today() - datetime.timedelta(days=1)
     filtered = []
@@ -163,10 +163,10 @@ def prepare_data(price_data):
       - Listen mit Timestamps, Labels, Preisen in Cent
       - Index des aktuellen Preises
       - Tageshoch/-tief (nur 'today')
-      - Globales Min/Max (fuer Achsen-Skalierung)
-      - Stunden bis zum naechsten Tiefstpreis
-    Gibt ein Dictionary mit allen Werten zurueck.
-    (Wird fuer die Info-Box unten genutzt.)
+      - Globales Min/Max (für Achsen-Skalierung)
+      - Stunden bis zum nächsten Tiefstpreis
+    Gibt ein Dictionary mit allen Werten zurück.
+    (Wird für die Info-Box unten genutzt.)
     """
     timestamps = []
     labels = []
@@ -252,11 +252,11 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     chart_height = chart_y_bottom - chart_y_top
     panel_width = chart_width / 2
 
-    # --- Linkes Panel (Preis heute) ---
+    # --- Linkes Panel (Preis heute oder gestriger Verbrauch + Preis) ---
     times_left = []
     values_left = []
     if left_type == "combo":
-        # Bei "combo" erwarten wir, dass left_data ein Dictionary mit Schluesseln "price" und "consumption" ist.
+        # Bei "combo" erwarten wir, dass left_data ein Dictionary mit Schlüsseln "price" und "consumption" ist.
         for slot in left_data["price"]:
             dt_obj = datetime.datetime.fromisoformat(slot['startsAt'])
             times_left.append(dt_obj)
@@ -274,7 +274,7 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
             values_left.append(slot['consumption'])
     n_left = len(values_left)
 
-    # --- Rechtes Panel (Preis morgen) ---
+    # --- Rechtes Panel (Preis morgen oder Preis heute im Historical-Modus) ---
     times_right = []
     values_right = []
     for slot in right_data:
@@ -312,13 +312,13 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
         current_val += step
     draw.text((chart_x_start - 45, chart_y_top - 20), "Preis (ct/kWh)", font=fonts["small"], fill=0)
 
-    # X-Positionen links
+    # X-Positionen links (für linkes Panel)
     x_positions_left = []
     for i in range(n_left):
         x = chart_x_start + i * (panel_width / n_left) + (panel_width / n_left) / 2
         x_positions_left.append(x)
 
-    # Zeichne Step-Chart links (Preis heute)
+    # Zeichne Step-Chart links (Preis heute oder gestriger Verbrauch)
     for i in range(n_left - 1):
         x1 = x_positions_left[i]
         x2 = x_positions_left[i+1]
@@ -336,7 +336,7 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
         if i % 2 == 0:
             draw.text((x_pos, chart_y_bottom + 5), times_left[i].strftime("%Hh"), font=fonts["small"], fill=0)
 
-    # Labeling von Tageshoch und Tagestief im linken Panel (Preis heute)
+    # Labeling von Tageshoch und Tagestief im linken Panel
     lowest_left_index = min(range(n_left), key=lambda i: values_left[i])
     highest_left_index = max(range(n_left), key=lambda i: values_left[i])
     x_low_left = x_positions_left[lowest_left_index]
@@ -346,20 +346,32 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     draw.text((x_low_left, y_low_left - 15), f"{values_left[lowest_left_index]/100:.2f}", font=fonts["small"], fill=0)
     draw.text((x_high_left, y_high_left - 15), f"{values_left[highest_left_index]/100:.2f}", font=fonts["small"], fill=0)
 
-    # Marker: Im Future-Modus wird der aktuelle Marker im linken Panel gezeichnet,
-    # im Historical-Modus soll der Marker im rechten Panel erscheinen.
+    # Marker: An dieser Stelle wird der aktuelle Preis marker minutengenau positioniert.
+    # Im Future-Modus erfolgt dies im linken Panel, im Historical-Modus im rechten Panel.
     if mode == "future":
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        current_idx_left = min(range(n_left), key=lambda i: abs((times_left[i] - now_utc).total_seconds()))
-        x_marker_left = x_positions_left[current_idx_left]
-        y_marker_left = chart_y_bottom - (values_left[current_idx_left] - left_min) * scale_y_left
+        # Nutze den ersten Zeitstempel des linken Panels als Bezug (z. B. 00:00)
+        now_local = datetime.datetime.now(datetime.timezone.utc)
+        start_time_left = times_left[0]
+        # Berechne die Anzahl der Stunden (als Fließkommazahl) seit Startzeit
+        fractional_index = (now_local - start_time_left).total_seconds() / 3600.0
+        # Berechne die X-Position im linken Panel (panel_width entspricht 24 Stunden)
+        x_marker_left = chart_x_start + (fractional_index / n_left) * panel_width
+        # Lineare Interpolation des Preises zwischen den benachbarten Stundenwerten:
+        floor_idx = int(math.floor(fractional_index))
+        ceil_idx = min(floor_idx + 1, n_left - 1)
+        frac = fractional_index - floor_idx
+        if floor_idx < n_left - 1:
+            price_interp = values_left[floor_idx] + frac * (values_left[ceil_idx] - values_left[floor_idx])
+        else:
+            price_interp = values_left[floor_idx]
+        y_marker_left = chart_y_bottom - (price_interp - left_min) * scale_y_left
         marker_radius = 5
         draw.ellipse((x_marker_left - marker_radius, y_marker_left - marker_radius,
                       x_marker_left + marker_radius, y_marker_left + marker_radius), fill=0)
         draw.text((x_marker_left - 35, y_marker_left - 10),
-                  f"{values_left[current_idx_left]/100:.2f}", font=fonts["small"], fill=0)
+                  f"{price_interp/100:.2f}", font=fonts["small"], fill=0)
 
-    # --- Rechtes Panel (Preis morgen) ---
+    # --- Rechtes Panel (Preis morgen oder Preis heute im Historical-Modus) ---
     x_positions_right = []
     for i in range(n_right):
         x = chart_x_start + panel_width + i * (panel_width / n_right) + (panel_width / n_right) / 2
@@ -373,7 +385,7 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
         draw.line((x1, y1, x2, y1), fill=0, width=2)
         draw.line((x2, y1, x2, y2), fill=0, width=2)
 
-    # Labeling von Tageshoch und Tagestief im rechten Panel (Preis morgen)
+    # Labeling von Tageshoch und Tagestief im rechten Panel (Preis morgen bzw. Preis heute im Historical-Modus)
     lowest_right_index = min(range(n_right), key=lambda i: values_right[i])
     highest_right_index = max(range(n_right), key=lambda i: values_right[i])
     x_low_right = x_positions_right[lowest_right_index]
@@ -392,17 +404,25 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
         if i % 2 == 0:
             draw.text((x_pos, chart_y_bottom + 5), times_right[i].strftime("%Hh"), font=fonts["small"], fill=0)
 
-    # Im Historical-Modus: Marker fuer aktuellen Preis im rechten Panel
+    # Im Historical-Modus: Marker für aktuellen Preis im rechten Panel (minutengenaue Positionierung)
     if mode == "historical":
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        current_idx_right = min(range(n_right), key=lambda i: abs((times_right[i] - now_utc).total_seconds()))
-        x_marker_right = x_positions_right[current_idx_right]
-        y_marker_right = chart_y_bottom - (values_right[current_idx_right] - right_min) * scale_y_right
+        now_local = datetime.datetime.now(datetime.timezone.utc)
+        start_time_right = times_right[0]
+        fractional_index = (now_local - start_time_right).total_seconds() / 3600.0
+        x_marker_right = chart_x_start + panel_width + (fractional_index / n_right) * panel_width
+        floor_idx = int(math.floor(fractional_index))
+        ceil_idx = min(floor_idx + 1, n_right - 1)
+        frac = fractional_index - floor_idx
+        if floor_idx < n_right - 1:
+            price_interp = values_right[floor_idx] + frac * (values_right[ceil_idx] - values_right[floor_idx])
+        else:
+            price_interp = values_right[floor_idx]
+        y_marker_right = chart_y_bottom - (price_interp - right_min) * scale_y_right
         marker_radius = 5
         draw.ellipse((x_marker_right - marker_radius, y_marker_right - marker_radius,
                       x_marker_right + marker_radius, y_marker_right + marker_radius), fill=0)
         draw.text((x_marker_right - 35, y_marker_right - 10),
-                  f"{values_right[current_idx_right]/100:.2f}", font=fonts["small"], fill=0)
+                  f"{price_interp/100:.2f}", font=fonts["small"], fill=0)
 
     # Vertikaler Trenner zwischen Panels
     x_trenner = chart_x_start + panel_width
