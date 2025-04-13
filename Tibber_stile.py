@@ -44,8 +44,8 @@ def load_cache(filename):
 def update_price_cache(price_data):
     """
     Speichert die heutigen Preisdaten (price_data['today']) in einem Cache.
-    Falls im Cache bereits Daten eines anderen Tages vorliegen, werden diese als
-    gestrige Daten abgelegt.
+    Falls im Cache bereits Daten eines anderen Tages vorliegen, werden diese
+    als gestrige Daten abgelegt.
     """
     today_date_str = datetime.date.today().isoformat()
     cached_today = load_cache(CACHE_FILE_TODAY)
@@ -243,6 +243,54 @@ def draw_dashed_line(draw, x1, y1, x2, y2, fill=0, width=1, dash_length=4, gap_l
         sy2 = y1 + dy * ratio_end
         draw.line((sx1, sy1, sx2, sy2), fill=fill, width=width)
 
+def get_stepped_marker_position(now_local, times_list, x_positions, values_list,
+                                chart_y_bottom, val_min, scale_y):
+    """
+    Sucht das passende Stundenintervall [i, i+1) für now_local in times_list und
+    berechnet:
+      - x-Position: linear zwischen x_positions[i] und x_positions[i+1] 
+        (→ minütliche Wanderung)
+      - y-Position: diskreter Preis von values_list[i] (Stufe)
+    Falls now_local < times_list[0], wird i=0 genommen (links).
+    Falls now_local >= times_list[-1], wird i=len(times_list)-1 genommen (rechts).
+    Gibt (x_marker, y_marker, price_stepped_index) zurück.
+    """
+    n = len(times_list)
+    if n == 0:
+        # Keine Daten -> Kein Marker
+        return (0, chart_y_bottom, -1)
+    
+    # Falls Zeit < erstes Interval, an den linken Rand
+    if now_local < times_list[0]:
+        x = x_positions[0]
+        y = chart_y_bottom - (values_list[0] - val_min) * scale_y
+        return (x, y, 0)
+    
+    # Falls Zeit > letztes Interval, an den rechten Rand
+    if now_local >= times_list[-1]:
+        i = n - 1
+        x = x_positions[i]
+        y = chart_y_bottom - (values_list[i] - val_min) * scale_y
+        return (x, y, i)
+    
+    # Interval [i, i+1) suchen
+    for i in range(n - 1):
+        if times_list[i] <= now_local < times_list[i+1]:
+            total_secs = (times_list[i+1] - times_list[i]).total_seconds()
+            elapsed_secs = (now_local - times_list[i]).total_seconds()
+            frac = elapsed_secs / total_secs  # 0..1
+            # X interpoliert
+            x = x_positions[i] + frac * (x_positions[i+1] - x_positions[i])
+            # Y = diskreter Preis der abgelaufenen Stunde i
+            y = chart_y_bottom - (values_list[i] - val_min) * scale_y
+            return (x, y, i)
+    
+    # Falls wir hier rausfallen (edge case), nimm letztes Intervall
+    i = n - 1
+    x = x_positions[i]
+    y = chart_y_bottom - (values_list[i] - val_min) * scale_y
+    return (x, y, i)
+
 def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts, mode):
     """
     Zeichnet einen 2-Panel-Chart.
@@ -250,8 +298,6 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
       - Linkes Panel zeigt den Preis heute inkl. Datenbeschriftung (Tiefst- und Hochtpreis)
         und markiert den aktuellen Preis.
       - Rechtes Panel zeigt den Preis morgen (bei Future) bzw. den Preis heute im Historical-Modus.
-    Es wird eine einheitliche Skala verwendet, die aus allen Daten (heute und morgen)
-    berechnet wird und um 0.5 ct gepuffert wird.
     """
     import datetime
     chart_x_start = 60
@@ -295,10 +341,13 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
 
     # Gemeinsame Skala berechnen aus beiden Panels:
     all_values = values_left + values_right
-    global_min = (min(all_values) if all_values else 0) - 0.5
-    global_max = (max(all_values) if all_values else 1) + 0.5
-    if global_max <= global_min:
-        global_max = global_min + 1
+    if not all_values:
+        global_min, global_max = 0.0, 1.0
+    else:
+        global_min = min(all_values) - 0.5
+        global_max = max(all_values) + 0.5
+        if global_max <= global_min:
+            global_max = global_min + 1.0
     global_range = global_max - global_min
     scale_y = chart_height / global_range
 
@@ -309,6 +358,7 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
 
     # Zeichne gemeinsame Y-Achse links
     draw.line((chart_x_start, chart_y_top, chart_x_start, chart_y_bottom), fill=0, width=2)
+    # Hilfsraster (alle 5ct)
     step = 5
     current_val = left_min - (left_min % step)
     if current_val < 0:
@@ -320,114 +370,114 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
         current_val += step
     draw.text((chart_x_start - 45, chart_y_top - 20), "Preis (ct/kWh)", font=fonts["small"], fill=0)
 
-    # X-Positionen im linken Panel berechnen
+    # X-Positionen im linken Panel berechnen (Stunden-Slots)
     x_positions_left = []
     for i in range(n_left):
-        x = chart_x_start + i * (panel_width / n_left) + (panel_width / n_left) / 2
+        x = chart_x_start + i * (panel_width / max(1, n_left - 1))
         x_positions_left.append(x)
 
-    # Zeichne den stufenförmigen Chart im linken Panel
+    # Zeichne Step-Chart im linken Panel
     for i in range(n_left - 1):
         x1 = x_positions_left[i]
         x2 = x_positions_left[i+1]
         y1 = chart_y_bottom - (values_left[i] - left_min) * scale_y_left
         y2 = chart_y_bottom - (values_left[i+1] - left_min) * scale_y_left
+        # Horizontale Linie
         draw.line((x1, y1, x2, y1), fill=0, width=2)
+        # Vertikale Linie am Übergang
         draw.line((x2, y1, x2, y2), fill=0, width=2)
 
-    # Gestrichelte Linien und Stundenbeschriftung im linken Panel (jede 2. Stunde)
+    # Gestrichelte Linien und X-Beschriftung
     for i in range(n_left):
-        x_pos = x_positions_left[i]
-        y_val = chart_y_bottom - (values_left[i] - left_min) * scale_y_left
-        if y_val < chart_y_bottom:
-            draw_dashed_line(draw, x_pos, chart_y_bottom, x_pos, y_val, fill=0, width=1, dash_length=2, gap_length=2)
-        if i % 2 == 0:
-            draw.text((x_pos, chart_y_bottom + 5), times_left[i].strftime("%Hh"), font=fonts["small"], fill=0)
+        if i < len(times_left):
+            x_pos = x_positions_left[i]
+            y_val = chart_y_bottom - (values_left[i] - left_min) * scale_y_left
+            if y_val < chart_y_bottom:
+                draw_dashed_line(draw, x_pos, chart_y_bottom, x_pos, y_val, fill=0, width=1,
+                                 dash_length=2, gap_length=2)
+            # Stunden-Label (jede 2. Stunde)
+            if i % 2 == 0:
+                draw.text((x_pos, chart_y_bottom + 5), times_left[i].strftime("%Hh"), font=fonts["small"], fill=0)
 
-    # Labeling von Tageshoch und Tagestief im linken Panel
-    lowest_left_index = min(range(n_left), key=lambda i: values_left[i])
-    highest_left_index = max(range(n_left), key=lambda i: values_left[i])
-    x_low_left = x_positions_left[lowest_left_index]
-    y_low_left = chart_y_bottom - (values_left[lowest_left_index] - left_min) * scale_y_left
-    x_high_left = x_positions_left[highest_left_index]
-    y_high_left = chart_y_bottom - (values_left[highest_left_index] - left_min) * scale_y_left
-    draw.text((x_low_left, y_low_left - 15), f"{values_left[lowest_left_index]/100:.2f}", font=fonts["small"], fill=0)
-    draw.text((x_high_left, y_high_left - 15), f"{values_left[highest_left_index]/100:.2f}", font=fonts["small"], fill=0)
+    # Tageshoch-/tief im linken Panel
+    if n_left > 0:
+        lowest_left_index = min(range(n_left), key=lambda i: values_left[i])
+        highest_left_index = max(range(n_left), key=lambda i: values_left[i])
+        x_low_left = x_positions_left[lowest_left_index]
+        y_low_left = chart_y_bottom - (values_left[lowest_left_index] - left_min) * scale_y_left
+        x_high_left = x_positions_left[highest_left_index]
+        y_high_left = chart_y_bottom - (values_left[highest_left_index] - left_min) * scale_y_left
+        draw.text((x_low_left, y_low_left - 15),
+                  f"{values_left[lowest_left_index]/100:.2f}", font=fonts["small"], fill=0)
+        draw.text((x_high_left, y_high_left - 15),
+                  f"{values_left[highest_left_index]/100:.2f}", font=fonts["small"], fill=0)
 
-    # Marker im Future-Modus: 
-    # Der Marker soll sich minutengenau horizontal bewegen, aber vertikal
-    # den diskreten Preiswert der abgelaufenen Stunde anzeigen.
-    if mode == "future":
+    # Marker im Future-Modus: horizontale Interpolation, vertikaler Stufenpreis
+    if mode == "future" and n_left > 0:
         now_local = datetime.datetime.now(local_tz)
-        start_time_left = times_left[0]
-        fractional_index = (now_local - start_time_left).total_seconds() / 3600.0
-        # Clamp: negativer Wert auf 0 und nicht über n_left-1 hinaus:
-        if fractional_index < 0:
-            fractional_index = 0
-        elif fractional_index > n_left - 1:
-            fractional_index = n_left - 1
-        x_marker_left = chart_x_start + (fractional_index / n_left) * panel_width
-        floor_idx = int(math.floor(fractional_index))
-        price_stepped = values_left[floor_idx]  # Nutze den diskreten Preiswert
-        y_marker_left = chart_y_bottom - (price_stepped - left_min) * scale_y_left
+        x_marker_left, y_marker_left, idx_left = get_stepped_marker_position(
+            now_local, times_left, x_positions_left, values_left,
+            chart_y_bottom, left_min, scale_y_left
+        )
         marker_radius = 5
         draw.ellipse((x_marker_left - marker_radius, y_marker_left - marker_radius,
-                      x_marker_left + marker_radius, y_marker_left + marker_radius), fill=0)
+                      x_marker_left + marker_radius, y_marker_left + marker_radius),
+                     fill=0)
+        # Aktueller Preis
+        stepped_price = values_left[idx_left] if idx_left >= 0 else 0
         draw.text((x_marker_left - 35, y_marker_left - 10),
-                  f"{price_stepped/100:.2f}", font=fonts["small"], fill=0)
+                  f"{stepped_price/100:.2f}", font=fonts["small"], fill=0)
 
-    # --- Rechtes Panel (Preis morgen bzw. im Historical-Modus Preis heute) ---
+    # --- Rechtes Panel (Preis morgen bzw. Preis heute im Historical-Modus) ---
     x_positions_right = []
     for i in range(n_right):
-        x = chart_x_start + panel_width + i * (panel_width / n_right) + (panel_width / n_right) / 2
+        x = chart_x_start + panel_width + i * (panel_width / max(1, n_right - 1))
         x_positions_right.append(x)
 
     for i in range(n_right - 1):
         x1 = x_positions_right[i]
         x2 = x_positions_right[i+1]
-        y1 = chart_y_bottom - (values_right[i] - global_min) * scale_y_right
-        y2 = chart_y_bottom - (values_right[i+1] - global_min) * scale_y_right
+        y1 = chart_y_bottom - (values_right[i] - right_min) * scale_y_right
+        y2 = chart_y_bottom - (values_right[i+1] - right_min) * scale_y_right
         draw.line((x1, y1, x2, y1), fill=0, width=2)
         draw.line((x2, y1, x2, y2), fill=0, width=2)
 
-    # Labeling im rechten Panel
-    lowest_right_index = min(range(n_right), key=lambda i: values_right[i])
-    highest_right_index = max(range(n_right), key=lambda i: values_right[i])
-    x_low_right = x_positions_right[lowest_right_index]
-    y_low_right = chart_y_bottom - (values_right[lowest_right_index] - global_min) * scale_y_right
-    x_high_right = x_positions_right[highest_right_index]
-    y_high_right = chart_y_bottom - (values_right[highest_right_index] - global_min) * scale_y_right
-    draw.text((x_low_right, y_low_right - 15), f"{values_right[lowest_right_index]/100:.2f}", font=fonts["small"], fill=0)
-    draw.text((x_high_right, y_high_right - 15), f"{values_right[highest_right_index]/100:.2f}", font=fonts["small"], fill=0)
-
-    # Gestrichelte Linien und Stundenbeschriftung im rechten Panel (jede 2. Stunde)
     for i in range(n_right):
-        x_pos = x_positions_right[i]
-        y_val = chart_y_bottom - (values_right[i] - global_min) * scale_y_right
-        if y_val < chart_y_bottom:
-            draw_dashed_line(draw, x_pos, chart_y_bottom, x_pos, y_val, fill=0, width=1, dash_length=2, gap_length=2)
-        if i % 2 == 0:
-            draw.text((x_pos, chart_y_bottom + 5), times_right[i].strftime("%Hh"), font=fonts["small"], fill=0)
+        if i < len(times_right):
+            x_pos = x_positions_right[i]
+            y_val = chart_y_bottom - (values_right[i] - right_min) * scale_y_right
+            if y_val < chart_y_bottom:
+                draw_dashed_line(draw, x_pos, chart_y_bottom, x_pos, y_val, fill=0, width=1,
+                                 dash_length=2, gap_length=2)
+            if i % 2 == 0:
+                draw.text((x_pos, chart_y_bottom + 5), times_right[i].strftime("%Hh"), font=fonts["small"], fill=0)
 
-    # Marker im Historical-Modus: 
-    # Hier wird ebenfalls der diskrete Preiswert verwendet.
-    if mode == "historical":
+    if n_right > 0:
+        lowest_right_index = min(range(n_right), key=lambda i: values_right[i])
+        highest_right_index = max(range(n_right), key=lambda i: values_right[i])
+        x_low_right = x_positions_right[lowest_right_index]
+        y_low_right = chart_y_bottom - (values_right[lowest_right_index] - right_min) * scale_y_right
+        x_high_right = x_positions_right[highest_right_index]
+        y_high_right = chart_y_bottom - (values_right[highest_right_index] - right_min) * scale_y_right
+        draw.text((x_low_right, y_low_right - 15),
+                  f"{values_right[lowest_right_index]/100:.2f}", font=fonts["small"], fill=0)
+        draw.text((x_high_right, y_high_right - 15),
+                  f"{values_right[highest_right_index]/100:.2f}", font=fonts["small"], fill=0)
+
+    # Marker im Historical-Modus (rechts)
+    if mode == "historical" and n_right > 0:
         now_local = datetime.datetime.now(local_tz)
-        start_time_right = times_right[0]
-        fractional_index = (now_local - start_time_right).total_seconds() / 3600.0
-        if fractional_index < 0:
-            fractional_index = 0
-        elif fractional_index > n_right - 1:
-            fractional_index = n_right - 1
-        x_marker_right = chart_x_start + panel_width + (fractional_index / n_right) * panel_width
-        floor_idx = int(math.floor(fractional_index))
-        price_stepped = values_right[floor_idx]
-        y_marker_right = chart_y_bottom - (price_stepped - global_min) * scale_y_right
+        x_marker_right, y_marker_right, idx_right = get_stepped_marker_position(
+            now_local, times_right, x_positions_right, values_right,
+            chart_y_bottom, right_min, scale_y_right
+        )
         marker_radius = 5
         draw.ellipse((x_marker_right - marker_radius, y_marker_right - marker_radius,
-                      x_marker_right + marker_radius, y_marker_right + marker_radius), fill=0)
+                      x_marker_right + marker_radius, y_marker_right + marker_radius),
+                     fill=0)
+        stepped_price = values_right[idx_right] if idx_right >= 0 else 0
         draw.text((x_marker_right - 35, y_marker_right - 10),
-                  f"{price_stepped/100:.2f}", font=fonts["small"], fill=0)
+                  f"{stepped_price/100:.2f}", font=fonts["small"], fill=0)
 
     # Vertikaler Trenner zwischen den Panels
     x_trenner = chart_x_start + panel_width
@@ -493,12 +543,12 @@ def main():
 
     if mode == 'future':
         left_data = price_data['today']      # Preis heute
-        right_data = price_data['tomorrow']    # Preis morgen
+        right_data = price_data['tomorrow']  # Preis morgen
         left_type = "price"
         right_type = "price"
     else:
         if cached_yesterday and cached_yesterday.get('data'):
-            # Kombiniere gestrige Preisdaten und Verbrauchsdaten in einem Dictionary
+            # Kombiniere gestrige Preis-Daten und Verbrauchsdaten in einem Dictionary
             consumption_data = get_consumption_data()
             filtered_consumption = filter_yesterday_consumption(consumption_data)
             left_data = {"price": cached_yesterday["data"], "consumption": filtered_consumption}
