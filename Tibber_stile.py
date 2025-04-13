@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
-    from backports.zoneinfo import ZoneInfo  # Falls du Python <3.9 nutzt
+    from backports.zoneinfo import ZoneInfo  # Für ältere Python-Versionen
 
 # Lokale Zeitzone (anpassen, falls nötig)
 local_tz = ZoneInfo("Europe/Berlin")
@@ -356,16 +356,19 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
 
     # Marker im Future-Modus: 
     # Der Marker soll sich minutengenau horizontal bewegen, aber vertikal
-    # den stufigen (diskreten) Preiswert der abgelaufenen Stunde anzeigen.
+    # den diskreten Preiswert der abgelaufenen Stunde anzeigen.
     if mode == "future":
         now_local = datetime.datetime.now(local_tz)
         start_time_left = times_left[0]
         fractional_index = (now_local - start_time_left).total_seconds() / 3600.0
+        # Clamp: negativer Wert auf 0 und nicht über n_left-1 hinaus:
+        if fractional_index < 0:
+            fractional_index = 0
+        elif fractional_index > n_left - 1:
+            fractional_index = n_left - 1
         x_marker_left = chart_x_start + (fractional_index / n_left) * panel_width
         floor_idx = int(math.floor(fractional_index))
-        if floor_idx >= n_left:
-            floor_idx = n_left - 1
-        price_stepped = values_left[floor_idx]  # Nutze den diskreten Preiswert der abgelaufenen Stunde
+        price_stepped = values_left[floor_idx]  # Nutze den diskreten Preiswert
         y_marker_left = chart_y_bottom - (price_stepped - left_min) * scale_y_left
         marker_radius = 5
         draw.ellipse((x_marker_left - marker_radius, y_marker_left - marker_radius,
@@ -407,15 +410,17 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
             draw.text((x_pos, chart_y_bottom + 5), times_right[i].strftime("%Hh"), font=fonts["small"], fill=0)
 
     # Marker im Historical-Modus: 
-    # Hier ebenfalls den diskreten Preiswert verwenden.
+    # Hier wird ebenfalls der diskrete Preiswert verwendet.
     if mode == "historical":
         now_local = datetime.datetime.now(local_tz)
         start_time_right = times_right[0]
         fractional_index = (now_local - start_time_right).total_seconds() / 3600.0
+        if fractional_index < 0:
+            fractional_index = 0
+        elif fractional_index > n_right - 1:
+            fractional_index = n_right - 1
         x_marker_right = chart_x_start + panel_width + (fractional_index / n_right) * panel_width
         floor_idx = int(math.floor(fractional_index))
-        if floor_idx >= n_right:
-            floor_idx = n_right - 1
         price_stepped = values_right[floor_idx]
         y_marker_right = chart_y_bottom - (price_stepped - global_min) * scale_y_right
         marker_radius = 5
