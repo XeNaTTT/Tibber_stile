@@ -11,6 +11,15 @@ import datetime
 import random
 from PIL import Image, ImageDraw, ImageFont
 
+# ZoneInfo für Zeitzonenkonversion (Python 3.9+)
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # Falls du Python <3.9 nutzt
+
+# Lokale Zeitzone (anpassen, falls nötig)
+local_tz = ZoneInfo("Europe/Berlin")
+
 # Pfade zum Waveshare-Treiber anpassen (falls nötig)
 sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib')
 sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib/waveshare_epd')
@@ -134,7 +143,7 @@ def extract_yesterday_consumption(consumption_data):
     total_consumption = 0.0
     total_cost = 0.0
     for record in consumption_data:
-        record_from = datetime.datetime.fromisoformat(record['from']).date()
+        record_from = datetime.datetime.fromisoformat(record['from']).astimezone(local_tz).date()
         if record_from == yesterday_date:
             total_consumption += record.get('consumption', 0.0)
             total_cost += record.get('cost', 0.0)
@@ -150,7 +159,7 @@ def filter_yesterday_consumption(consumption_data):
         return filtered
     for record in consumption_data:
         try:
-            dt = datetime.datetime.fromisoformat(record['from']).date()
+            dt = datetime.datetime.fromisoformat(record['from']).astimezone(local_tz).date()
             if dt == yesterday_date:
                 filtered.append(record)
         except Exception:
@@ -174,12 +183,13 @@ def prepare_data(price_data):
     day_boundary_index = len(price_data['today'])
     for day in ['today', 'tomorrow']:
         for slot in price_data[day]:
-            dt_obj = datetime.datetime.fromisoformat(slot['startsAt'])
+            # Konvertiere in lokale Zeit
+            dt_obj = datetime.datetime.fromisoformat(slot['startsAt']).astimezone(local_tz)
             timestamps.append(dt_obj)
             labels.append(dt_obj.strftime("%d.%m %Hh"))
             prices_cents.append(slot['total'] * 100.0)
     current_price = price_data['current']['total'] * 100.0
-    current_time_obj = datetime.datetime.fromisoformat(price_data['current']['startsAt'])
+    current_time_obj = datetime.datetime.fromisoformat(price_data['current']['startsAt']).astimezone(local_tz)
     current_index = min(
         range(len(timestamps)),
         key=lambda i: abs((timestamps[i] - current_time_obj).total_seconds())
@@ -258,18 +268,18 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     if left_type == "combo":
         # Bei "combo" erwarten wir, dass left_data ein Dictionary mit Schlüsseln "price" und "consumption" ist.
         for slot in left_data["price"]:
-            dt_obj = datetime.datetime.fromisoformat(slot['startsAt'])
+            dt_obj = datetime.datetime.fromisoformat(slot['startsAt']).astimezone(local_tz)
             times_left.append(dt_obj)
             values_left.append(slot['total'] * 100.0)
     elif left_type == "price":
         for slot in left_data:
-            dt_obj = datetime.datetime.fromisoformat(slot['startsAt'])
+            dt_obj = datetime.datetime.fromisoformat(slot['startsAt']).astimezone(local_tz)
             times_left.append(dt_obj)
             values_left.append(slot['total'] * 100.0)
     else:
         # left_type == "consumption"
         for slot in left_data:
-            dt_obj = datetime.datetime.fromisoformat(slot['from'])
+            dt_obj = datetime.datetime.fromisoformat(slot['from']).astimezone(local_tz)
             times_left.append(dt_obj)
             values_left.append(slot['consumption'])
     n_left = len(values_left)
@@ -278,7 +288,7 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     times_right = []
     values_right = []
     for slot in right_data:
-        dt_obj = datetime.datetime.fromisoformat(slot['startsAt'])
+        dt_obj = datetime.datetime.fromisoformat(slot['startsAt']).astimezone(local_tz)
         times_right.append(dt_obj)
         values_right.append(slot['total'] * 100.0)
     n_right = len(values_right)
@@ -348,14 +358,14 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     # Der Marker soll sich minutengenau horizontal bewegen, aber vertikal
     # den stufigen (diskreten) Preiswert der abgelaufenen Stunde anzeigen.
     if mode == "future":
-        now_local = datetime.datetime.now(datetime.timezone.utc)
+        now_local = datetime.datetime.now(local_tz)
         start_time_left = times_left[0]
         fractional_index = (now_local - start_time_left).total_seconds() / 3600.0
         x_marker_left = chart_x_start + (fractional_index / n_left) * panel_width
         floor_idx = int(math.floor(fractional_index))
         if floor_idx >= n_left:
             floor_idx = n_left - 1
-        price_stepped = values_left[floor_idx]  # Hier wird nicht interpoliert
+        price_stepped = values_left[floor_idx]  # Nutze den diskreten Preiswert der abgelaufenen Stunde
         y_marker_left = chart_y_bottom - (price_stepped - left_min) * scale_y_left
         marker_radius = 5
         draw.ellipse((x_marker_left - marker_radius, y_marker_left - marker_radius,
@@ -397,9 +407,9 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
             draw.text((x_pos, chart_y_bottom + 5), times_right[i].strftime("%Hh"), font=fonts["small"], fill=0)
 
     # Marker im Historical-Modus: 
-    # Hier ebenso den stufigen (diskreten) Preiswert verwenden.
+    # Hier ebenfalls den diskreten Preiswert verwenden.
     if mode == "historical":
-        now_local = datetime.datetime.now(datetime.timezone.utc)
+        now_local = datetime.datetime.now(local_tz)
         start_time_right = times_right[0]
         fractional_index = (now_local - start_time_right).total_seconds() / 3600.0
         x_marker_right = chart_x_start + panel_width + (fractional_index / n_right) * panel_width
