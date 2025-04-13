@@ -517,7 +517,7 @@ def draw_info_box(draw, data, fonts):
 def main():
     epd = epd7in5_V2.EPD()
     epd.init()
-    epd.Clear()
+   # epd.Clear()
 
     Himage = Image.new('1', (epd.width, epd.height), 255)
     draw = ImageDraw.Draw(Himage)
