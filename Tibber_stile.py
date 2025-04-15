@@ -20,7 +20,7 @@ except ImportError:
 # Lokale Zeitzone (anpassen, falls nötig)
 local_tz = ZoneInfo("Europe/Berlin")
 
-# Pfade zum Waveshare-Treiber (anpassen, falls nötig)
+# Pfade zum Waveshare-Treiber anpassen (falls nötig)
 sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib')
 sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib/waveshare_epd')
 
@@ -42,11 +42,6 @@ def load_cache(filename):
     return None
 
 def update_price_cache(price_data):
-    """
-    Speichert die heutigen Preisdaten (price_data['today']) in einem Cache.
-    Falls im Cache bereits Daten eines anderen Tages vorliegen, werden diese
-    als gestrige Daten abgelegt.
-    """
     today_date_str = datetime.date.today().isoformat()
     cached_today = load_cache(CACHE_FILE_TODAY)
     if cached_today is None or cached_today.get('date') != today_date_str:
@@ -56,16 +51,9 @@ def update_price_cache(price_data):
         save_cache(cache_data, CACHE_FILE_TODAY)
 
 def get_cached_yesterday_price():
-    """
-    Lädt die gestrigen Preisdaten aus dem Cache (falls vorhanden).
-    """
     return load_cache(CACHE_FILE_YESTERDAY)
 
 def get_price_data():
-    """
-    Fragt die Tibber-API ab und gibt das price_data-Dictionary zurück.
-    Es werden "today" und "tomorrow" (sowie "current") abgefragt.
-    """
     headers = {
         "Authorization": "Bearer " + api_key.API_KEY,
         "Content-Type": "application/json"
@@ -90,10 +78,6 @@ def get_price_data():
     return response.json()['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
 
 def get_consumption_data():
-    """
-    Fragt die Tibber-API für Verbrauchsdaten ab (stündlich, letzte 48 Stunden).
-    Die Query wird angepasst, um die Daten aus dem 'nodes'-Feld zu holen.
-    """
     headers = {
         "Authorization": "Bearer " + api_key.API_KEY,
         "Content-Type": "application/json"
@@ -122,7 +106,7 @@ def get_consumption_data():
         print("Fehler beim Parsen der API-Antwort:", e)
         return None
     if "data" not in response_json:
-        print("Fehler in der API-Antwort, 'data'-Schlüssel fehlt:", response_json)
+        print("Fehler: 'data'-Schlüssel fehlt:", response_json)
         return None
     if "errors" in response_json:
         print("API-Fehler:", response_json["errors"])
@@ -135,9 +119,6 @@ def get_consumption_data():
     return consumption_data
 
 def extract_yesterday_consumption(consumption_data):
-    """
-    Berechnet aus den Verbrauchsdaten den Gesamtverbrauch und die Gesamtkosten für gestern.
-    """
     yesterday_date = datetime.date.today() - datetime.timedelta(days=1)
     total_consumption = 0.0
     total_cost = 0.0
@@ -149,9 +130,6 @@ def extract_yesterday_consumption(consumption_data):
     return total_consumption, total_cost
 
 def filter_yesterday_consumption(consumption_data):
-    """
-    Filtert aus den Verbrauchsdaten jene Records, die zu gestern gehören.
-    """
     yesterday_date = datetime.date.today() - datetime.timedelta(days=1)
     filtered = []
     if consumption_data is None:
@@ -166,9 +144,6 @@ def filter_yesterday_consumption(consumption_data):
     return filtered
 
 def prepare_data(price_data):
-    """
-    Bereitet die API-Daten (Timestamps, Labels, Preise) auf und berechnet diverse Werte.
-    """
     timestamps = []
     labels = []
     prices_cents = []
@@ -181,18 +156,12 @@ def prepare_data(price_data):
             prices_cents.append(slot['total'] * 100.0)
     current_price = price_data['current']['total'] * 100.0
     current_time_obj = datetime.datetime.fromisoformat(price_data['current']['startsAt']).astimezone(local_tz)
-    current_index = min(
-        range(len(timestamps)),
-        key=lambda i: abs((timestamps[i] - current_time_obj).total_seconds())
-    )
+    current_index = min(range(len(timestamps)), key=lambda i: abs((timestamps[i] - current_time_obj).total_seconds()))
     today_cents = [slot['total'] * 100.0 for slot in price_data['today']]
     lowest_today = min(today_cents)
     highest_today = max(today_cents)
-    future_slots = [
-        (timestamps[i], prices_cents[i])
-        for i in range(len(prices_cents))
-        if timestamps[i] >= current_time_obj
-    ]
+    future_slots = [(timestamps[i], prices_cents[i])
+                    for i in range(len(prices_cents)) if timestamps[i] >= current_time_obj]
     if future_slots:
         lowest_future_time, lowest_future_val = min(future_slots, key=lambda x: x[1])
         hours_to_lowest = round((lowest_future_time - current_time_obj).total_seconds() / 3600)
@@ -201,20 +170,11 @@ def prepare_data(price_data):
         hours_to_lowest = 0
     data_min = min(prices_cents) - 1 if prices_cents else 0
     data_max = max(prices_cents) + 1 if prices_cents else 0
-    return {
-        "timestamps": timestamps,
-        "labels": labels,
-        "prices_cents": prices_cents,
-        "day_boundary_index": day_boundary_index,
-        "current_price": current_price,
-        "current_index": current_index,
-        "lowest_today": lowest_today,
-        "highest_today": highest_today,
-        "lowest_future_val": lowest_future_val,
-        "hours_to_lowest": hours_to_lowest,
-        "data_min": data_min,
-        "data_max": data_max
-    }
+    return {"timestamps": timestamps, "labels": labels, "prices_cents": prices_cents,
+            "day_boundary_index": day_boundary_index, "current_price": current_price,
+            "current_index": current_index, "lowest_today": lowest_today, "highest_today": highest_today,
+            "lowest_future_val": lowest_future_val, "hours_to_lowest": hours_to_lowest,
+            "data_min": data_min, "data_max": data_max}
 
 def draw_dashed_line(draw, x1, y1, x2, y2, fill=0, width=1, dash_length=4, gap_length=4):
     dx = x2 - x1
@@ -236,12 +196,6 @@ def draw_dashed_line(draw, x1, y1, x2, y2, fill=0, width=1, dash_length=4, gap_l
 
 def get_stepped_marker_position(now_local, times_list, x_positions, values_list,
                                 chart_y_bottom, val_min, scale_y):
-    """
-    Sucht das passende Stundenintervall [i, i+1) für now_local in times_list und
-    berechnet:
-      - x-Position: linear zwischen x_positions[i] und x_positions[i+1] (minütliche Interpolation)
-      - y-Position: diskreter Preiswert von values_list[i] (Stufenwert)
-    """
     n = len(times_list)
     if n == 0:
         return (0, chart_y_bottom, -1)
@@ -260,10 +214,6 @@ def get_stepped_marker_position(now_local, times_list, x_positions, values_list,
     return (x_positions[-1], chart_y_bottom - (values_list[-1]-val_min)*scale_y, n-1)
 
 def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts, mode, draw_marker_flag=True):
-    """
-    Zeichnet den 2-Panel-Chart. Wird draw_marker_flag=False übergeben, wird kein Marker gezeichnet.
-    Gibt zusätzlich Parameter zurück, die für den Partial Refresh benötigt werden.
-    """
     chart_x_start = 60
     chart_x_end = 800
     chart_y_top = 50
@@ -301,7 +251,6 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
         values_right.append(slot['total'] * 100.0)
     n_right = len(values_right)
 
-    # Gemeinsame Skala
     all_values = values_left + values_right
     if not all_values:
         global_min, global_max = 0.0, 1.0
@@ -318,7 +267,6 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     right_min = global_min
     scale_y_right = scale_y
 
-    # Zeichne Y-Achse und Raster
     draw.line((chart_x_start, chart_y_top, chart_x_start, chart_y_bottom), fill=0, width=2)
     step = 5
     current_val = left_min - (left_min % step)
@@ -331,7 +279,6 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
         current_val += step
     draw.text((chart_x_start-45, chart_y_top-20), "Preis (ct/kWh)", font=fonts["small"], fill=0)
 
-    # X-Positionen links: auf n_left-1 Segmente verteilen
     x_positions_left = []
     if n_left > 1:
         for i in range(n_left):
@@ -339,8 +286,7 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
             x_positions_left.append(x)
     else:
         x_positions_left = [chart_x_start]
-
-    # Zeichne den Step-Chart links
+    
     for i in range(n_left-1):
         x1 = x_positions_left[i]
         x2 = x_positions_left[i+1]
@@ -365,15 +311,14 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
         draw.text((x_low_left, y_low_left-15), f"{values_left[lowest_left_index]/100:.2f}", font=fonts["small"], fill=0)
         draw.text((x_high_left, y_high_left-15), f"{values_left[highest_left_index]/100:.2f}", font=fonts["small"], fill=0)
 
-    # Marker im Future-Modus
-    if mode == "future" and n_left > 0 and draw_marker_flag:
+    if mode == "future" and n_left > 0:
         now_local = datetime.datetime.now(local_tz)
         x_marker, y_marker, idx_left = get_stepped_marker_position(now_local, times_left, x_positions_left, values_left, chart_y_bottom, left_min, scale_y_left)
         marker_radius = 5
         draw.ellipse((x_marker-marker_radius, y_marker-marker_radius, x_marker+marker_radius, y_marker+marker_radius), fill=0)
-        draw.text((x_marker-35, y_marker-10), f"{values_left[idx_left]/100:.2f}", font=fonts["small"], fill=0)
+        stepped_price = values_left[idx_left] if idx_left >= 0 else 0
+        draw.text((x_marker-35, y_marker-10), f"{stepped_price/100:.2f}", font=fonts["small"], fill=0)
 
-    # Rechtes Panel
     x_positions_right = []
     if n_right > 1:
         for i in range(n_right):
@@ -404,11 +349,9 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
         y_high_right = chart_y_bottom - (values_right[highest_right_index]-right_min)*scale_y_right
         draw.text((x_low_right, y_low_right-15), f"{values_right[lowest_right_index]/100:.2f}", font=fonts["small"], fill=0)
         draw.text((x_high_right, y_high_right-15), f"{values_right[highest_right_index]/100:.2f}", font=fonts["small"], fill=0)
-    # Vertikaler Trenner
     x_trenner = chart_x_start + panel_width
     draw.line((x_trenner, chart_y_top, x_trenner, chart_y_bottom), fill=0, width=2)
 
-    # Rückgabe der benötigten Parameter für Partial Refresh (linkes Panel)
     return {
         "times_left": times_left,
         "x_positions_left": x_positions_left,
@@ -419,9 +362,6 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     }
 
 def draw_marker_on_image(image, chart_params, fonts):
-    """
-    Zeichnet den Marker auf der linken Seite auf das gegebene Image.
-    """
     draw = ImageDraw.Draw(image)
     now_local = datetime.datetime.now(local_tz)
     times_left = chart_params["times_left"]
@@ -442,11 +382,11 @@ def draw_subtitle_labels(draw, fonts, mode):
     label_y = 415
     bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
     if mode == "future":
-        draw.text((chart_x_start + 10, label_y), "Preis heute", font=bold_font, fill=0)
-        draw.text((chart_x_start + panel_width + 10, label_y), "Preis morgen", font=bold_font, fill=0)
+        draw.text((chart_x_start+10, label_y), "Preis heute", font=bold_font, fill=0)
+        draw.text((chart_x_start+panel_width+10, label_y), "Preis morgen", font=bold_font, fill=0)
     else:
-        draw.text((chart_x_start + 10, label_y), "Verbrauch gestern", font=bold_font, fill=0)
-        draw.text((chart_x_start + panel_width + 10, label_y), "Preis heute", font=bold_font, fill=0)
+        draw.text((chart_x_start+10, label_y), "Verbrauch gestern", font=bold_font, fill=0)
+        draw.text((chart_x_start+panel_width+10, label_y), "Preis heute", font=bold_font, fill=0)
 
 def draw_info_box(draw, data, fonts):
     chart_x_start = 60
@@ -463,21 +403,27 @@ def draw_info_box(draw, data, fonts):
     available_width = chart_x_end - chart_x_start
     spacing = available_width / num_texts
     for i, text in enumerate(info_texts):
-        x_text = chart_x_start + i * spacing + 5
+        x_text = chart_x_start + i*spacing + 5
         draw.text((x_text, info_y), text, font=bold_font, fill=0)
 
-##############################
+###########################
 # Hauptprogramm – Partial Refresh
-##############################
+###########################
 def main():
     epd = epd7in5_V2.EPD()
     epd.init()
-    # Optional: Kein Clear, um Flackern zu vermeiden.
+    # Kein Clear(), um Flackern zu minimieren
     # epd.Clear()
 
-    # Erstelle Full Image (statischer Chart) für Full Refresh:
+    # Erstelle den Full Refresh – statischer Chart (inkl. Marker) für den ersten Refresh:
     full_image = Image.new('1', (epd.width, epd.height), 255)
     draw_full = ImageDraw.Draw(full_image)
+    
+    font_small = ImageFont.load_default()
+    font_big = ImageFont.load_default()
+    info_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+    fonts = {"small": font_small, "big": font_big, "info_font": info_font}
+
     price_data = get_price_data()
     update_price_cache(price_data)
     cached_yesterday = get_cached_yesterday_price()
@@ -500,29 +446,38 @@ def main():
             left_type = "consumption"
         right_data = price_data['today']
         right_type = "price"
-    # Zeichne den gesamten Chart (inkl. Marker) für Full Refresh:
+
     draw_two_day_chart(draw_full, left_data, left_type, right_data, right_type, fonts, mode)
     draw_subtitle_labels(draw_full, fonts, mode)
     data = prepare_data(price_data)
     draw_info_box(draw_full, data, fonts)
-    draw_full.text((10, 470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
+    draw_full.text((10,470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
     epd.display(epd.getbuffer(full_image))
-
-    # Erzeuge statischen Hintergrund (ohne Marker) als Basis für Partial Refresh:
+    
+    # Erzeuge den statischen Hintergrund (ohne Marker) für Partial Refresh:
     background = Image.new('1', (epd.width, epd.height), 255)
     draw_bg = ImageDraw.Draw(background)
     chart_params = draw_two_day_chart(draw_bg, left_data, left_type, right_data, right_type, fonts, mode, draw_marker_flag=False)
     draw_subtitle_labels(draw_bg, fonts, mode)
     draw_info_box(draw_bg, data, fonts)
-    draw_bg.text((10, 470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
+    draw_bg.text((10,470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
 
-    # Merke dir die letzte Full Refresh Stunde:
+    # Falls epd7in5_V2 noch keine init_part-Methode hat, fügen wir sie hier hinzu:
+    if not hasattr(epd, 'init_part'):
+        def init_part():
+            # Beispiel: Sende Befehl, um den Partial-Update-Modus zu aktivieren.
+            # Der Befehl 0x91 ist oft in Waveshare-Demos zu finden – ggf. anpassen.
+            epd.send_command(0x91)
+            # Optional: Sende weitere Daten, falls erforderlich:
+            # epd.send_data(some_value)
+        epd.init_part = init_part
+
     last_full_hour = datetime.datetime.now(local_tz).hour
 
     while True:
         now = datetime.datetime.now(local_tz)
         if now.hour != last_full_hour:
-            # Stündlicher Full Refresh:
+            # Stündlicher Full Refresh
             price_data = get_price_data()
             update_price_cache(price_data)
             cached_yesterday = get_cached_yesterday_price()
@@ -551,33 +506,26 @@ def main():
             draw_subtitle_labels(draw_full, fonts, mode)
             data = prepare_data(price_data)
             draw_info_box(draw_full, data, fonts)
-            draw_full.text((10, 470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
+            draw_full.text((10,470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
             epd.display(epd.getbuffer(full_image))
             background = Image.new('1', (epd.width, epd.height), 255)
             draw_bg = ImageDraw.Draw(background)
             chart_params = draw_two_day_chart(draw_bg, left_data, left_type, right_data, right_type, fonts, mode, draw_marker_flag=False)
             draw_subtitle_labels(draw_bg, fonts, mode)
             draw_info_box(draw_bg, data, fonts)
-            draw_bg.text((10, 470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
+            draw_bg.text((10,470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
             last_full_hour = now.hour
         else:
-            # Partial Refresh: Marker neu zeichnen
+            # Partial Refresh: Zeichne den Marker neu auf einer Kopie des statischen Hintergrunds
             partial_image = background.copy()
             draw_marker_on_image(partial_image, chart_params, fonts)
-            # Wechsel in den Partial-Modus:
             epd.init_part()
-            # Hier aktualisieren wir den gesamten Bildschirm (oder einen definierten Bereich)
             epd.display_Partial(epd.getbuffer(partial_image), 0, 0, epd.width, epd.height)
         time.sleep(60)
 
 if __name__ == "__main__":
-    # Fonts definieren:
     font_small = ImageFont.load_default()
     font_big = ImageFont.load_default()
     info_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
-    fonts = {
-        "small": font_small,
-        "big": font_big,
-        "info_font": info_font
-    }
+    fonts = {"small": font_small, "big": font_big, "info_font": info_font}
     main()
