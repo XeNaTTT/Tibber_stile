@@ -156,7 +156,7 @@ def prepare_data(price_data):
             prices_cents.append(slot['total'] * 100.0)
     current_price = price_data['current']['total'] * 100.0
     current_time_obj = datetime.datetime.fromisoformat(price_data['current']['startsAt']).astimezone(local_tz)
-    current_index = min(range(len(timestamps)), key=lambda i: abs((timestamps[i] - current_time_obj).total_seconds()))
+    current_index = min(range(len(timestamps)), key=lambda i: abs((timestamps[i]-current_time_obj).total_seconds()))
     today_cents = [slot['total'] * 100.0 for slot in price_data['today']]
     lowest_today = min(today_cents)
     highest_today = max(today_cents)
@@ -205,8 +205,8 @@ def get_stepped_marker_position(now_local, times_list, x_positions, values_list,
         return (x_positions[-1], chart_y_bottom - (values_list[-1]-val_min)*scale_y, n-1)
     for i in range(n-1):
         if times_list[i] <= now_local < times_list[i+1]:
-            total_secs = (times_list[i+1] - times_list[i]).total_seconds()
-            elapsed_secs = (now_local - times_list[i]).total_seconds()
+            total_secs = (times_list[i+1]-times_list[i]).total_seconds()
+            elapsed_secs = (now_local-times_list[i]).total_seconds()
             frac = elapsed_secs / total_secs
             x = x_positions[i] + frac*(x_positions[i+1]-x_positions[i])
             y = chart_y_bottom - (values_list[i]-val_min)*scale_y
@@ -311,7 +311,7 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
         draw.text((x_low_left, y_low_left-15), f"{values_left[lowest_left_index]/100:.2f}", font=fonts["small"], fill=0)
         draw.text((x_high_left, y_high_left-15), f"{values_left[highest_left_index]/100:.2f}", font=fonts["small"], fill=0)
 
-    if mode == "future" and n_left > 0:
+    if mode == "future" and n_left > 0 and draw_marker_flag:
         now_local = datetime.datetime.now(local_tz)
         x_marker, y_marker, idx_left = get_stepped_marker_position(now_local, times_left, x_positions_left, values_left, chart_y_bottom, left_min, scale_y_left)
         marker_radius = 5
@@ -352,14 +352,9 @@ def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts
     x_trenner = chart_x_start + panel_width
     draw.line((x_trenner, chart_y_top, x_trenner, chart_y_bottom), fill=0, width=2)
 
-    return {
-        "times_left": times_left,
-        "x_positions_left": x_positions_left,
-        "values_left": values_left,
-        "left_min": left_min,
-        "scale_y_left": scale_y_left,
-        "chart_y_bottom": chart_y_bottom
-    }
+    return {"times_left": times_left, "x_positions_left": x_positions_left,
+            "values_left": values_left, "left_min": left_min,
+            "scale_y_left": scale_y_left, "chart_y_bottom": chart_y_bottom}
 
 def draw_marker_on_image(image, chart_params, fonts):
     draw = ImageDraw.Draw(image)
@@ -413,8 +408,7 @@ def main():
     epd = epd7in5_V2.EPD()
     epd.init()
     # Kein Clear(), um Flackern zu minimieren
-    # epd.Clear()
-
+    
     # Erstelle den Full Refresh – statischer Chart (inkl. Marker) für den ersten Refresh:
     full_image = Image.new('1', (epd.width, epd.height), 255)
     draw_full = ImageDraw.Draw(full_image)
@@ -462,22 +456,30 @@ def main():
     draw_info_box(draw_bg, data, fonts)
     draw_bg.text((10,470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
 
-    # Falls epd7in5_V2 noch keine init_part-Methode hat, fügen wir sie hier hinzu:
+    # Falls epd7in5_V2 noch keine init_part()-Methode hat, fügen wir sie hinzu:
     if not hasattr(epd, 'init_part'):
         def init_part():
-            # Beispiel: Sende Befehl, um den Partial-Update-Modus zu aktivieren.
-            # Der Befehl 0x91 ist oft in Waveshare-Demos zu finden – ggf. anpassen.
+            # Sende Befehl zur Aktivierung des Partial Update Modus.
+            # Laut Manual wird häufig der Befehl 0x91 verwendet.
             epd.send_command(0x91)
-            # Optional: Sende weitere Daten, falls erforderlich:
-            # epd.send_data(some_value)
         epd.init_part = init_part
+
+    # Für Waveshare-Demos wird oft auch display_Base_color() verwendet
+    # Falls nicht implementiert, könnte man es so ergänzen:
+    if not hasattr(epd, 'display_Base_color'):
+        def display_Base_color(color):
+            # Erstelle einen Puffer mit dem übergebenen Farbwert (0xFF für Weiß).
+            buf = [color] * (int(epd.width/8) * epd.height)
+            epd.send_command(0x10)
+            epd.send_data2(buf)
+        epd.display_Base_color = display_Base_color
 
     last_full_hour = datetime.datetime.now(local_tz).hour
 
     while True:
         now = datetime.datetime.now(local_tz)
         if now.hour != last_full_hour:
-            # Stündlicher Full Refresh
+            # Stündlicher Full Refresh:
             price_data = get_price_data()
             update_price_cache(price_data)
             cached_yesterday = get_cached_yesterday_price()
@@ -516,10 +518,13 @@ def main():
             draw_bg.text((10,470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
             last_full_hour = now.hour
         else:
-            # Partial Refresh: Zeichne den Marker neu auf einer Kopie des statischen Hintergrunds
+            # Partial Refresh: Marker neu zeichnen
             partial_image = background.copy()
             draw_marker_on_image(partial_image, chart_params, fonts)
+            # Setze den Basisfarbwert auf Weiß (0xFF) – so wie im Manual empfohlen
+            epd.display_Base_color(0xFF)
             epd.init_part()
+            # Aktualisiere den gesamten Bildschirm, du kannst hier den zu refreshenden Bereich anpassen
             epd.display_Partial(epd.getbuffer(partial_image), 0, 0, epd.width, epd.height)
         time.sleep(60)
 
