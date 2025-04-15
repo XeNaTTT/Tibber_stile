@@ -407,6 +407,21 @@ def draw_info_box(draw, data, fonts):
 def main():
     epd = epd7in5_V2.EPD()
     epd.init()
+    # Falls epd keine display_Partial-Methode besitzt, fügen wir sie hinzu:
+if not hasattr(epd, 'display_Partial'):
+    def display_Partial(buf, x, y, w, h):
+        # Aktiviert den Partial Update Modus – hier wird 0x91 als Befehl verwendet,
+        # was in vielen Waveshare-Demos so gemacht wird. Passen Sie das ggf. an.
+        epd.send_command(0x91)
+        # Sende den Bildpuffer (hier wird der gesamte Bildschirm aktualisiert)
+        epd.send_data2(buf)
+        # Schließe den Refresh-Vorgang ab (ähnlich wie in display())
+        epd.send_command(0x12)
+        # Kurze Wartezeit, dann Busy abfragen
+        import epdconfig
+        epdconfig.delay_ms(100)
+        epd.ReadBusy()
+    epd.display_Partial = display_Partial
     # Kein Clear(), um Flackern zu minimieren
     
     # Erstelle den Full Refresh – statischer Chart (inkl. Marker) für den ersten Refresh:
