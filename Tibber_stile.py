@@ -219,4 +219,334 @@ def get_stepped_marker_position(now_local, times_list, x_positions, values_list,
             return (x, y, i)
     return (x_positions[-1], chart_y_bottom - (values_list[-1]-val_min)*scale_y, n-1)
 
-def draw_two_day_chart(draw, left_data, left_type,_
+def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts, mode, draw_marker_flag=True):
+    chart_x_start = 60
+    chart_x_end = 800
+    chart_y_top = 50
+    chart_y_bottom = 400
+    chart_width = chart_x_end - chart_x_start
+    chart_height = chart_y_bottom - chart_y_top
+    panel_width = chart_width/2
+
+    # Linkes Panel
+    times_left = []
+    values_left = []
+    if left_type == "combo":
+        for slot in left_data["price"]:
+            dt_obj = datetime.datetime.fromisoformat(slot['startsAt']).astimezone(local_tz)
+            times_left.append(dt_obj)
+            values_left.append(slot['total'] * 100.0)
+    elif left_type == "price":
+        for slot in left_data:
+            dt_obj = datetime.datetime.fromisoformat(slot['startsAt']).astimezone(local_tz)
+            times_left.append(dt_obj)
+            values_left.append(slot['total'] * 100.0)
+    else:
+        for slot in left_data:
+            dt_obj = datetime.datetime.fromisoformat(slot['from']).astimezone(local_tz)
+            times_left.append(dt_obj)
+            values_left.append(slot['consumption'])
+    n_left = len(values_left)
+
+    # Rechtes Panel
+    times_right = []
+    values_right = []
+    for slot in right_data:
+        dt_obj = datetime.datetime.fromisoformat(slot['startsAt']).astimezone(local_tz)
+        times_right.append(dt_obj)
+        values_right.append(slot['total'] * 100.0)
+    n_right = len(values_right)
+
+    all_values = values_left + values_right
+    if not all_values:
+        global_min, global_max = 0.0, 1.0
+    else:
+        global_min = min(all_values)-0.5
+        global_max = max(all_values)+0.5
+        if global_max <= global_min:
+            global_max = global_min+1.0
+    global_range = global_max-global_min
+    scale_y = chart_height/global_range
+
+    left_min = global_min
+    scale_y_left = scale_y
+    right_min = global_min
+    scale_y_right = scale_y
+
+    draw.line((chart_x_start, chart_y_top, chart_x_start, chart_y_bottom), fill=0, width=2)
+    step = 5
+    current_val = left_min - (left_min % step)
+    if current_val < 0:
+        current_val = 0
+    while current_val <= global_max:
+        y = chart_y_bottom - (current_val-left_min)*scale_y_left
+        draw.line((chart_x_start-5, y, chart_x_start, y), fill=0, width=1)
+        draw.text((chart_x_start-45, y-7), f"{current_val/100:.2f}", font=fonts["small"], fill=0)
+        current_val += step
+    draw.text((chart_x_start-45, chart_y_top-20), "Preis (ct/kWh)", font=fonts["small"], fill=0)
+
+    # X-Positionen links (Stunden-Slots gleichmäßig verteilen)
+    x_positions_left = []
+    if n_left > 1:
+        for i in range(n_left):
+            x = chart_x_start + i*(panel_width/(n_left-1))
+            x_positions_left.append(x)
+    else:
+        x_positions_left = [chart_x_start]
+
+    for i in range(n_left-1):
+        x1 = x_positions_left[i]
+        x2 = x_positions_left[i+1]
+        y1 = chart_y_bottom - (values_left[i]-left_min)*scale_y_left
+        y2 = chart_y_bottom - (values_left[i+1]-left_min)*scale_y_left
+        draw.line((x1,y1,x2,y1), fill=0, width=2)
+        draw.line((x2,y1,x2,y2), fill=0, width=2)
+    for i in range(n_left):
+        x_pos = x_positions_left[i]
+        y_val = chart_y_bottom - (values_left[i]-left_min)*scale_y_left
+        if y_val < chart_y_bottom:
+            draw_dashed_line(draw, x_pos, chart_y_bottom, x_pos, y_val, fill=0, width=1, dash_length=2, gap_length=2)
+        if i % 2 == 0:
+            draw.text((x_pos, chart_y_bottom+5), times_left[i].strftime("%Hh"), font=fonts["small"], fill=0)
+    if n_left > 0:
+        lowest_left_index = min(range(n_left), key=lambda i: values_left[i])
+        highest_left_index = max(range(n_left), key=lambda i: values_left[i])
+        x_low_left = x_positions_left[lowest_left_index]
+        y_low_left = chart_y_bottom - (values_left[lowest_left_index]-left_min)*scale_y_left
+        x_high_left = x_positions_left[highest_left_index]
+        y_high_left = chart_y_bottom - (values_left[highest_left_index]-left_min)*scale_y_left
+        draw.text((x_low_left, y_low_left-15), f"{values_left[lowest_left_index]/100:.2f}", font=fonts["small"], fill=0)
+        draw.text((x_high_left, y_high_left-15), f"{values_left[highest_left_index]/100:.2f}", font=fonts["small"], fill=0)
+
+    # Marker im Future-Modus (linkes Panel)
+    if mode == "future" and n_left > 0 and draw_marker_flag:
+        now_local = datetime.datetime.now(local_tz)
+        x_marker, y_marker, idx_left = get_stepped_marker_position(now_local, times_left, x_positions_left, values_left, chart_y_bottom, left_min, scale_y_left)
+        marker_radius = 5
+        draw.ellipse((x_marker-marker_radius, y_marker-marker_radius, x_marker+marker_radius, y_marker+marker_radius), fill=0)
+        stepped_price = values_left[idx_left] if idx_left >= 0 else 0
+        draw.text((x_marker-35, y_marker-10), f"{stepped_price/100:.2f}", font=fonts["small"], fill=0)
+
+    # Rechtes Panel
+    x_positions_right = []
+    if n_right > 1:
+        for i in range(n_right):
+            x = chart_x_start + panel_width + i*(panel_width/(n_right-1))
+            x_positions_right.append(x)
+    else:
+        x_positions_right = [chart_x_start+panel_width]
+    for i in range(n_right-1):
+        x1 = x_positions_right[i]
+        x2 = x_positions_right[i+1]
+        y1 = chart_y_bottom - (values_right[i]-right_min)*scale_y_right
+        y2 = chart_y_bottom - (values_right[i+1]-right_min)*scale_y_right
+        draw.line((x1,y1,x2,y1), fill=0, width=2)
+        draw.line((x2,y1,x2,y2), fill=0, width=2)
+    for i in range(n_right):
+        x_pos = x_positions_right[i]
+        y_val = chart_y_bottom - (values_right[i]-right_min)*scale_y_right
+        if y_val < chart_y_bottom:
+            draw_dashed_line(draw, x_pos, chart_y_bottom, x_pos, y_val, fill=0, width=1, dash_length=2, gap_length=2)
+        if i % 2 == 0:
+            draw.text((x_pos, chart_y_bottom+5), times_right[i].strftime("%Hh"), font=fonts["small"], fill=0)
+    if n_right > 0:
+        lowest_right_index = min(range(n_right), key=lambda i: values_right[i])
+        highest_right_index = max(range(n_right), key=lambda i: values_right[i])
+        x_low_right = x_positions_right[lowest_right_index]
+        y_low_right = chart_y_bottom - (values_right[lowest_right_index]-right_min)*scale_y_right
+        x_high_right = x_positions_right[highest_right_index]
+        y_high_right = chart_y_bottom - (values_right[highest_right_index]-right_min)*scale_y_right
+        draw.text((x_low_right, y_low_right-15), f"{values_right[lowest_right_index]/100:.2f}", font=fonts["small"], fill=0)
+        draw.text((x_high_right, y_high_right-15), f"{values_right[highest_right_index]/100:.2f}", font=fonts["small"], fill=0)
+    x_trenner = chart_x_start + panel_width
+    draw.line((x_trenner, chart_y_top, x_trenner, chart_y_bottom), fill=0, width=2)
+
+    return {"times_left": times_left, "x_positions_left": x_positions_left,
+            "values_left": values_left, "left_min": left_min,
+            "scale_y_left": scale_y_left, "chart_y_bottom": chart_y_bottom}
+
+def draw_marker_on_image(image, chart_params, fonts):
+    draw = ImageDraw.Draw(image)
+    now_local = datetime.datetime.now(local_tz)
+    times_left = chart_params["times_left"]
+    x_positions_left = chart_params["x_positions_left"]
+    values_left = chart_params["values_left"]
+    left_min = chart_params["left_min"]
+    scale_y_left = chart_params["scale_y_left"]
+    chart_y_bottom = chart_params["chart_y_bottom"]
+    x_marker, y_marker, idx = get_stepped_marker_position(now_local, times_left, x_positions_left, values_left, chart_y_bottom, left_min, scale_y_left)
+    marker_radius = 5
+    draw.ellipse((x_marker-marker_radius, y_marker-marker_radius, x_marker+marker_radius, y_marker+marker_radius), fill=0)
+    draw.text((x_marker-35, y_marker-10), f"{values_left[idx]/100:.2f}", font=fonts["small"], fill=0)
+
+def draw_subtitle_labels(draw, fonts, mode):
+    chart_x_start = 60
+    chart_x_end = 800
+    panel_width = (chart_x_end-chart_x_start)/2
+    label_y = 415
+    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
+    if mode == "future":
+        draw.text((chart_x_start+10, label_y), "Preis heute", font=bold_font, fill=0)
+        draw.text((chart_x_start+panel_width+10, label_y), "Preis morgen", font=bold_font, fill=0)
+    else:
+        draw.text((chart_x_start+10, label_y), "Verbrauch gestern", font=bold_font, fill=0)
+        draw.text((chart_x_start+panel_width+10, label_y), "Preis heute", font=bold_font, fill=0)
+
+def draw_info_box(draw, data, fonts):
+    chart_x_start = 60
+    chart_x_end = 800
+    info_y = 440
+    bold_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
+    info_texts = [
+        f"Aktueller Preis: {data['current_price']/100:.2f}",
+        f"Tagestief: {data['lowest_today']/100:.2f}",
+        f"Tageshoch: {data['highest_today']/100:.2f}",
+        f"Tiefstpreis in: {data['hours_to_lowest']}h | {data['lowest_future_val']/100:.2f}"
+    ]
+    num_texts = len(info_texts)
+    available_width = chart_x_end - chart_x_start
+    spacing = available_width / num_texts
+    for i, text in enumerate(info_texts):
+        x_text = chart_x_start + i*spacing + 5
+        draw.text((x_text, info_y), text, font=bold_font, fill=0)
+
+###########################
+# Hauptprogramm – Partial Refresh
+###########################
+def main():
+    epd = epd7in5_V2.EPD()
+    epd.init()
+    # Kein Clear(), um Flackern zu minimieren
+
+    # Falls epd kein display_Partial hat, "monkey-patchen" wir es:
+    if not hasattr(epd, 'display_Partial'):
+        def display_Partial(buf, x, y, w, h):
+            epd.send_command(0x91)  # Befehl laut Manual (anpassen, falls nötig)
+            epd.send_data2(buf)
+            epd.send_command(0x12)
+            import epdconfig
+            epdconfig.delay_ms(100)
+            epd.ReadBusy()
+        epd.display_Partial = display_Partial
+
+    # Erstelle den Full Refresh – statischer Chart (inkl. Marker) für den ersten Refresh:
+    full_image = Image.new('1', (epd.width, epd.height), 255)
+    draw_full = ImageDraw.Draw(full_image)
+    
+    font_small = ImageFont.load_default()
+    font_big = ImageFont.load_default()
+    info_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+    fonts = {"small": font_small, "big": font_big, "info_font": info_font}
+
+    price_data = get_price_data()
+    update_price_cache(price_data)
+    cached_yesterday = get_cached_yesterday_price()
+    if price_data['tomorrow'] and price_data['tomorrow'][0]['total'] is not None:
+        mode = 'future'
+        left_data = price_data['today']
+        right_data = price_data['tomorrow']
+        left_type = "price"
+        right_type = "price"
+    else:
+        mode = 'historical'
+        if cached_yesterday and cached_yesterday.get('data'):
+            consumption_data = get_consumption_data()
+            filtered_consumption = filter_yesterday_consumption(consumption_data)
+            left_data = {"price": cached_yesterday["data"], "consumption": filtered_consumption}
+            left_type = "combo"
+        else:
+            consumption_data = get_consumption_data()
+            left_data = filter_yesterday_consumption(consumption_data)
+            left_type = "consumption"
+        right_data = price_data['today']
+        right_type = "price"
+
+    draw_two_day_chart(draw_full, left_data, left_type, right_data, right_type, fonts, mode)
+    draw_subtitle_labels(draw_full, fonts, mode)
+    data = prepare_data(price_data)
+    draw_info_box(draw_full, data, fonts)
+    draw_full.text((10,470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
+    epd.display(epd.getbuffer(full_image))
+    
+    # Erstelle den statischen Hintergrund (ohne Marker) für Partial Refresh:
+    background = Image.new('1', (epd.width, epd.height), 255)
+    draw_bg = ImageDraw.Draw(background)
+    chart_params = draw_two_day_chart(draw_bg, left_data, left_type, right_data, right_type, fonts, mode, draw_marker_flag=False)
+    draw_subtitle_labels(draw_bg, fonts, mode)
+    draw_info_box(draw_bg, data, fonts)
+    draw_bg.text((10,470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
+
+    # Falls epd besitzt noch keine init_part(), fügen wir sie hinzu:
+    if not hasattr(epd, 'init_part'):
+        def init_part():
+            epd.send_command(0x91)
+        epd.init_part = init_part
+
+    # Falls epd besitzt noch keine display_Base_color(), fügen wir sie hinzu:
+    if not hasattr(epd, 'display_Base_color'):
+        def display_Base_color(color):
+            buf = [color] * (int(epd.width/8) * epd.height)
+            epd.send_command(0x10)
+            epd.send_data2(buf)
+        epd.display_Base_color = display_Base_color
+
+    last_full_hour = datetime.datetime.now(local_tz).hour
+
+    # Haupt-Loop: Ein Full Refresh wird einmal pro Stunde ausgeführt, Partial Refresh ansonsten minütlich.
+    while True:
+        now = datetime.datetime.now(local_tz)
+        if now.hour != last_full_hour:
+            # Stündlicher Full Refresh:
+            price_data = get_price_data()
+            update_price_cache(price_data)
+            cached_yesterday = get_cached_yesterday_price()
+            if price_data['tomorrow'] and price_data['tomorrow'][0]['total'] is not None:
+                mode = 'future'
+                left_data = price_data['today']
+                right_data = price_data['tomorrow']
+                left_type = "price"
+                right_type = "price"
+            else:
+                mode = 'historical'
+                if cached_yesterday and cached_yesterday.get('data'):
+                    consumption_data = get_consumption_data()
+                    filtered_consumption = filter_yesterday_consumption(consumption_data)
+                    left_data = {"price": cached_yesterday["data"], "consumption": filtered_consumption}
+                    left_type = "combo"
+                else:
+                    consumption_data = get_consumption_data()
+                    left_data = filter_yesterday_consumption(consumption_data)
+                    left_type = "consumption"
+                right_data = price_data['today']
+                right_type = "price"
+            full_image = Image.new('1', (epd.width, epd.height), 255)
+            draw_full = ImageDraw.Draw(full_image)
+            draw_two_day_chart(draw_full, left_data, left_type, right_data, right_type, fonts, mode, draw_marker_flag=True)
+            draw_subtitle_labels(draw_full, fonts, mode)
+            data = prepare_data(price_data)
+            draw_info_box(draw_full, data, fonts)
+            draw_full.text((10,470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
+            epd.display(epd.getbuffer(full_image))
+            background = Image.new('1', (epd.width, epd.height), 255)
+            draw_bg = ImageDraw.Draw(background)
+            chart_params = draw_two_day_chart(draw_bg, left_data, left_type, right_data, right_type, fonts, mode, draw_marker_flag=False)
+            draw_subtitle_labels(draw_bg, fonts, mode)
+            draw_info_box(draw_bg, data, fonts)
+            draw_bg.text((10,470), time.strftime("Update: %H:%M %d.%m.%Y"), font=fonts["small"], fill=0)
+            last_full_hour = now.hour
+        else:
+            # Partial Refresh: Aktualisiere nur den Marker
+            partial_image = background.copy()
+            draw_marker_on_image(partial_image, chart_params, fonts)
+            epd.display_Base_color(0xFF)
+            epd.init_part()
+            # Beachte: Falls nötig, passe den zu aktualisierenden Bereich (x,y,w,h) an.
+            epd.display_Partial(epd.getbuffer(partial_image), 0, 0, epd.width, epd.height)
+        time.sleep(60)
+
+if __name__ == "__main__":
+    font_small = ImageFont.load_default()
+    font_big = ImageFont.load_default()
+    info_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+    fonts = {"small": font_small, "big": font_big, "info_font": info_font}
+    main()
