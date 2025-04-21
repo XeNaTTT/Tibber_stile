@@ -469,5 +469,8 @@ def main():
 
 if __name__ == "__main__":
     main()
-
+   
+    # 30 Sekunden warten, bevor heruntergefahren wird
+    time.sleep(30)
+    
 os.system("sudo shutdown -h now")
