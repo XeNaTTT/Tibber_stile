@@ -473,4 +473,4 @@ if __name__ == "__main__":
     # 30 Sekunden warten, bevor heruntergefahren wird
     time.sleep(30)
     
-#os.system("sudo shutdown -h now")
+os.system("sudo shutdown -h now")
