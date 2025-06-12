@@ -1,263 +1,227 @@
 #!/usr/bin/python3
 # -*- coding:utf-8 -*-
 
-import sys
-import os
-import time
-import math
-import json
-import requests
-import datetime
+import sys, os, time, math, json, requests, datetime
 from PIL import Image, ImageDraw, ImageFont
 
-# ZoneInfo für Zeitzonenkonversion (Python 3.9+)
+# Zeitzone
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
     from backports.zoneinfo import ZoneInfo
 local_tz = ZoneInfo("Europe/Berlin")
 
-# E-Paper–Treiberpfade
+# E-Paper Pfade
 sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib')
 sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib/waveshare_epd')
 from waveshare_epd import epd7in5_V2
 import api_key
 
-# Caching
-CACHE_FILE_TODAY     = 'cached_today_price.json'
-CACHE_FILE_YESTERDAY = 'cached_yesterday_price.json'
+CACHE_TODAY     = 'cached_today_price.json'
+CACHE_YESTERDAY = 'cached_yesterday_price.json'
 
-def save_cache(data, filename):
-    with open(filename, 'w') as f:
-        json.dump(data, f)
-
-def load_cache(filename):
-    if os.path.exists(filename):
-        with open(filename) as f:
-            return json.load(f)
+def save_cache(data, fn):
+    with open(fn,'w') as f: json.dump(data,f)
+def load_cache(fn):
+    if os.path.exists(fn):
+        with open(fn) as f: return json.load(f)
     return None
 
-def update_price_cache(price_data):
-    today_str = datetime.date.today().isoformat()
-    cached = load_cache(CACHE_FILE_TODAY)
-    if not cached or cached.get('date') != today_str:
-        if cached:
-            save_cache(cached, CACHE_FILE_YESTERDAY)
-        save_cache({"date": today_str, "data": price_data['today']}, CACHE_FILE_TODAY)
+def update_price_cache(pd):
+    today = datetime.date.today().isoformat()
+    ct = load_cache(CACHE_TODAY)
+    if not ct or ct.get('date')!=today:
+        if ct: save_cache(ct, CACHE_YESTERDAY)
+        save_cache({"date":today,"data":pd['today']}, CACHE_TODAY)
 
-def get_cached_yesterday_price():
-    return load_cache(CACHE_FILE_YESTERDAY)
+def get_cached_yesterday():
+    return load_cache(CACHE_YESTERDAY)
 
 def get_price_data():
-    headers = {
-        "Authorization": "Bearer " + api_key.API_KEY,
-        "Content-Type": "application/json"
-    }
-    query = """
-    {
-      viewer {
-        homes {
-          currentSubscription {
-            priceInfo {
-              today { total startsAt }
-              tomorrow { total startsAt }
-              current  { total startsAt }
-            }
-          }
-        }
-      }
-    }
+    hdr = {"Authorization":"Bearer "+api_key.API_KEY,"Content-Type":"application/json"}
+    q = """
+    { viewer { homes { currentSubscription { priceInfo {
+      today { total startsAt }
+      tomorrow { total startsAt }
+      current { total startsAt }
+    }}}}}
     """
-    r = requests.post("https://api.tibber.com/v1-beta/gql",
-                      json={"query": query},
-                      headers=headers)
+    r = requests.post("https://api.tibber.com/v1-beta/gql", json={"query":q}, headers=hdr)
     return r.json()['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
 
 def get_consumption_data():
-    headers = {
-        "Authorization": "Bearer " + api_key.API_KEY,
-        "Content-Type": "application/json"
-    }
-    query = """
-    {
-      viewer {
-        homes {
-          consumption(resolution: HOURLY, last: 48) {
-            nodes { from consumption cost }
-          }
-        }
-      }
-    }
+    hdr = {"Authorization":"Bearer "+api_key.API_KEY,"Content-Type":"application/json"}
+    q = """
+    { viewer { homes { consumption(resolution:HOURLY,last:48) {
+      nodes { from consumption cost }
+    }}}}
     """
-    r = requests.post("https://api.tibber.com/v1-beta/gql",
-                      json={"query": query},
-                      headers=headers)
+    r = requests.post("https://api.tibber.com/v1-beta/gql", json={"query":q}, headers=hdr)
     j = r.json()
-    if "data" not in j or "errors" in j:
-        return None
+    if "data" not in j or "errors" in j: return None
     try:
         return j['data']['viewer']['homes'][0]['consumption']['nodes']
-    except Exception:
+    except:
         return None
 
-def filter_yesterday_consumption(consumption_data):
-    yesterday = datetime.date.today() - datetime.timedelta(days=1)
-    out = []
-    if not consumption_data:
-        return out
-    for rec in consumption_data:
+def filter_yesterday_consumption(cons):
+    yd = datetime.date.today() - datetime.timedelta(days=1)
+    out=[]
+    if not cons: return out
+    for r in cons:
         try:
-            dt = datetime.datetime.fromisoformat(rec['from']).astimezone(local_tz).date()
-            if dt == yesterday:
-                out.append(rec)
-        except Exception:
-            pass
+            dt = datetime.datetime.fromisoformat(r['from']).astimezone(local_tz).date()
+            if dt==yd: out.append(r)
+        except: pass
     return out
 
-def prepare_data(price_data):
-    timestamps, labels, prices = [], [], []
-    for slot in price_data['today']:
-        dt = datetime.datetime.fromisoformat(slot['startsAt']).astimezone(local_tz)
-        timestamps.append(dt)
-        labels.append(dt.strftime("%d.%m %Hh"))
-        prices.append(slot['total']*100)
-    return {
-        "timestamps": timestamps,
-        "labels":     labels,
-        "prices":     prices,
-        "current_price": price_data['current']['total']*100,
-        "lowest_today":  min([s['total']*100 for s in price_data['today']]),
-        "highest_today": max([s['total']*100 for s in price_data['today']]),
-        "hours_to_lowest": 0, "lowest_future_val":0
-    }
-
-def draw_dashed_line(draw, x1, y1, x2, y2, fill=0, width=1, dash_length=4, gap_length=4):
-    dx, dy = x2-x1, y2-y1
-    dist = math.hypot(dx, dy)
+def draw_dashed_line(draw, x1,y1,x2,y2, fill=0, width=1, dash_length=4, gap_length=4):
+    dx,dy = x2-x1, y2-y1
+    dist = math.hypot(dx,dy)
     if dist==0: return
     step = dash_length+gap_length
     for i in range(int(dist/step)+1):
-        start = i*step
-        end = min(start+dash_length, dist)
-        rs, re = start/dist, end/dist
-        sx, sy = x1+dx*rs, y1+dy*rs
-        ex, ey = x1+dx*re, y1+dy*re
-        draw.line((sx,sy,ex,ey), fill=fill, width=width)
+        s=i*step; e=min(s+dash_length,dist)
+        rs, re = s/dist, e/dist
+        xa,ya = x1+dx*rs, y1+dy*rs
+        xb,yb = x1+dx*re, y1+dy*re
+        draw.line((xa,ya,xb,yb), fill=fill, width=width)
 
 def draw_two_day_chart(draw, left_data, left_type, right_data, right_type, fonts, mode):
-    X0, X1 = 60, 800
-    Y0, Y1 = 50, 400
-    W, H   = X1-X0, Y1-Y0
-    PW     = W/2
+    # Chart‐Region
+    X0,X1 = 60,800; Y0,Y1 = 50,400; W,H = X1-X0, Y1-Y0; PW = W/2
 
-    # Linkes Panel: immer Preisdaten aus left_data
-    times_left  = []
-    values_left = []
+    # --- LINKES PANEL: Preisdaten aus left_data ---
+    times_l=[]; vals_l=[]
     for slot in left_data:
         dt = datetime.datetime.fromisoformat(slot['startsAt']).astimezone(local_tz)
-        times_left.append(dt)
-        values_left.append(slot['total']*100)
-    nL = len(values_left)
-
-    # X-Positionen links
-    if nL>1:
-        xL = [X0 + i*(PW/(nL-1)) for i in range(nL)]
-    else:
-        xL = [X0]
+        times_l.append(dt); vals_l.append(slot['total']*100)
+    nL = len(vals_l)
+    xL = [X0 + i*(PW/(nL-1)) for i in range(nL)] if nL>1 else [X0]
 
     # Y-Skalierung über beide Panels
-    all_vals = values_left + [s['total']*100 for s in right_data]
-    if all_vals:
-        vmin = min(all_vals)-0.5
-        vmax = max(all_vals)+0.5
-    else:
-        vmin, vmax = 0,1
-    scale_y = H/(vmax-vmin)
+    allv = vals_l + [s['total']*100 for s in right_data]
+    vmin,vmax = (min(allv)-0.5, max(allv)+0.5) if allv else (0,1)
+    sy = H/(vmax-vmin)
 
-    # Preislinie links
+    # Preis-Stufen links
     for i in range(nL-1):
-        x1, y1 = xL[i], Y1-(values_left[i]-vmin)*scale_y
-        x2, y2 = xL[i+1], Y1-(values_left[i+1]-vmin)*scale_y
-        draw.line((x1,y1,x2,y1), fill=0, width=2)
-        draw.line((x2,y1,x2,y2), fill=0, width=2)
+        x1,y1 = xL[i],   Y1-(vals_l[i]-vmin)*sy
+        x2,y2 = xL[i+1], Y1-(vals_l[i+1]-vmin)*sy
+        draw.line((x1,y1,x2,y1),fill=0,width=2)
+        draw.line((x2,y1,x2,y2),fill=0,width=2)
 
-    # Verbrauchslinie im historischen Modus
+    # Verbrauchskurve gestrichelt im historical mode (links)
     if mode=="historical":
-        cons = [slot.get('consumption') for slot in left_data]
-        if cons and len(cons)==nL and any(c is not None for c in cons):
-            cmn = min(cons); cmx = max(cons)
-            span = cmx-cmn if cmx>cmn else 1
-            y_cons = [Y1 - ((c-cmn)/span)*H for c in cons]
+        cons_nodes = filter_yesterday_consumption(get_consumption_data())
+        if cons_nodes and len(cons_nodes)==nL:
+            cons = [r['consumption'] for r in cons_nodes]
+            cmin,cmax = min(cons),max(cons)
+            span = cmax-cmin if cmax>cmin else 1
+            y_cons = [Y1 - ((c-cmin)/span)*H for c in cons]
             for i in range(len(y_cons)-1):
-                draw_dashed_line(draw, xL[i], y_cons[i], xL[i+1], y_cons[i+1],
-                                 fill=0,width=1,dash_length=4,gap_length=4)
+                draw_dashed_line(draw,
+                    xL[i],   y_cons[i],
+                    xL[i+1], y_cons[i+1],
+                    fill=0,width=1,dash_length=4,gap_length=4)
 
-    # X-Achse-Beschriftung links
-    for i, dt in enumerate(times_left):
+    # X-Achse Links
+    for i,dt in enumerate(times_l):
         if i%2==0:
-            draw.text((xL[i], Y1+5), dt.strftime("%Hh"), font=fonts["small"], fill=0)
+            draw.text((xL[i],Y1+5), dt.strftime("%Hh"), font=fonts["small"], fill=0)
 
-    # Mittlerer Trenner
+    # --- AKTUELLER MARKER ---
+    now = datetime.datetime.now(local_tz)
+    def find_marker(times, vals, xs):
+        for i in range(len(times)-1):
+            if times[i] <= now < times[i+1]:
+                frac = (now-times[i]).total_seconds() / (times[i+1]-times[i]).total_seconds()
+                x = xs[i] + frac*(xs[i+1]-xs[i])
+                y = Y1 - (vals[i]-vmin)*sy
+                return x,y,i
+        # außerhalb → letzter Punkt
+        return xs[-1], Y1-(vals[-1]-vmin)*sy, len(vals)-1
+
+    if mode=="future":
+        xm,ym,idx = find_marker(times_l, vals_l, xL)
+    else:
+        # historical: marker im rechten Panel
+        # rechte X-Positionen:
+        times_r = [datetime.datetime.fromisoformat(s['startsAt']).astimezone(local_tz) for s in right_data]
+        vals_r  = [s['total']*100 for s in right_data]
+        nR = len(vals_r)
+        xR = [X0+PW + i*(PW/(nR-1)) for i in range(nR)] if nR>1 else [X0+PW]
+        xm,ym,idx = find_marker(times_r, vals_r, xR)
+
+    # zeichne Marker-Punkt + Text
+    r=5
+    draw.ellipse((xm-r,ym-r,xm+r,ym+r), fill=0)
+    price = (vals_l[idx] if mode=="future" else vals_r[idx]) /100.0
+    draw.text((xm+8, ym-8), f"{price:.2f}", font=fonts["small"], fill=0)
+
+    # Trenner
     draw.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
 
-    # (rechtes Panel wie gehabt …)
+    # --- RECHTES PANEL: Preisdaten right_data (wie beim original) ---
+    # ... (kopiere hier einfach die Original-Logik, z.B. Stufenlinien & X-Achse)
 
-def draw_subtitle_labels(draw, fonts, mode):
-    X0, X1 = 60, 800
-    PW = (X1-X0)/2
-    lbl_y = 415
-    bf = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",12)
+def draw_subtitle_labels(draw,fonts,mode):
+    X0,X1=60,800; PW=(X1-X0)/2; y=415
+    bf=ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",12)
     if mode=="future":
-        draw.text((X0+10, lbl_y),"Preis heute", font=bf, fill=0)
-        draw.text((X0+PW+10, lbl_y),"Preis morgen", font=bf, fill=0)
+        draw.text((X0+10,y),"Preis heute",font=bf,fill=0)
+        draw.text((X0+PW+10,y),"Preis morgen",font=bf,fill=0)
     else:
-        draw.text((X0+10, lbl_y),"Verbrauch gestern", font=bf, fill=0)
-        draw.text((X0+PW+10,lbl_y),"Preis heute", font=bf, fill=0)
+        draw.text((X0+10,y),"Preise gestern",font=bf,fill=0)
+        draw.text((X0+PW+10,y),"Preis heute",font=bf,fill=0)
 
-def draw_info_box(draw, data, fonts):
-    X0, X1 = 60,800
-    Y = 440
-    bf = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",12)
-    infos = [
+def draw_info_box(draw,data,fonts):
+    X0,X1=60,800; y=440
+    bf=ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",12)
+    texts=[
         f"Aktueller Preis: {data['current_price']/100:.2f}",
         f"Tagestief:       {data['lowest_today']/100:.2f}",
         f"Tageshoch:       {data['highest_today']/100:.2f}",
         f"Tiefstpreis in:  {data['hours_to_lowest']}h | {data['lowest_future_val']/100:.2f}"
     ]
-    w = (X1-X0)/len(infos)
-    for i, txt in enumerate(infos):
-        draw.text((X0 + i*w +5, Y), txt, font=bf, fill=0)
+    w=(X1-X0)/len(texts)
+    for i,t in enumerate(texts):
+        draw.text((X0+i*w+5,y),t,font=bf,fill=0)
 
 def main():
-    epd = epd7in5_V2.EPD()
-    epd.init(); epd.Clear()
-
-    img  = Image.new('1',(epd.width,epd.height),255)
+    epd = epd7in5_V2.EPD(); epd.init(); epd.Clear()
+    img = Image.new('1',(epd.width,epd.height),255)
     draw = ImageDraw.Draw(img)
-    f_small = ImageFont.load_default()
-    f_info  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",14)
-    fonts = {"small":f_small,"info_font":f_info}
+    fonts = {
+      "small": ImageFont.load_default(),
+      "info_font": ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",14)
+    }
 
     pd = get_price_data()
     update_price_cache(pd)
-    cy = get_cached_yesterday_price()
+    cy = get_cached_yesterday()
 
     if pd['tomorrow'] and pd['tomorrow'][0]['total'] is not None:
-        mode = 'future'
+        mode = "future"
         left_data, right_data = pd['today'], pd['tomorrow']
-        left_type, right_type = "price","price"
     else:
-        mode = 'historical'
-        cons_data = get_consumption_data()
-        filt = filter_yesterday_consumption(cons_data)
-        # linke Daten in historical immer Preis+consumption
-        left_data = [{"startsAt":slot['from'], "total":0, "consumption":slot['consumption']} for slot in filt]
+        mode = "historical"
+        # Linke Daten aus Cache (gestern)
+        yd = get_cached_yesterday().get('data',[])
+        left_data = [
+            {"startsAt": s['startsAt'], "total": s['total'], "consumption": s.get('consumption',0)}
+            for s in yd
+        ]
         right_data = pd['today']
-        left_type, right_type = "combo","price"
 
-    draw_two_day_chart(draw,left_data,left_type,right_data,right_type,fonts,mode)
+    draw_two_day_chart(draw, left_data, None, right_data, None, fonts, mode)
     draw_subtitle_labels(draw,fonts,mode)
-    data = prepare_data(pd)
+    data = {
+      "current_price": pd['current']['total']*100,
+      "lowest_today":  min([s['total']*100 for s in pd['today']]),
+      "highest_today": max([s['total']*100 for s in pd['today']]),
+      "hours_to_lowest": 0, "lowest_future_val": 0
+    }
     draw_info_box(draw,data,fonts)
     draw.text((10,470), time.strftime("Update: %H:%M %d.%m.%Y"),
               font=fonts["small"], fill=0)
