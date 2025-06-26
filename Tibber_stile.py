@@ -185,11 +185,16 @@ def draw_two_day_chart(d, left_data, lt, right_data, rt, fonts, mode):
         for idx,off in ((sidx[0],40),(sidx[-1],15),(sidx[-2] if len(sidx)>1 else sidx[-1],15)):
             x=xs[idx]; y=Y1-(vals_today[idx]-vmin)*sy
             d.text((x-15,y-off),f"{vals_today[idx]/100:.2f}",font=fonts["small"],fill=0)
+        
         # annotate time 30px above lowest
-        x0=xs[idx_min]; y0=Y1-(vals_today[idx_min]-vmin)*sy
-        txt=times_today[idx_min].strftime("%Hh")
-        d.text((x0-10, y0-30), txt, font=fonts["info_font"], fill=0)
-
+        #x0=xs[idx_min]; y0=Y1-(vals_today[idx_min]-vmin)*sy
+        #txt=times_today[idx_min].strftime("%Hh")
+        #d.text((x0-10, y0-30), txt, font=fonts["info_font"], fill=0)
+        # Uhrzeit mittig im Chart holen
+        x0 = xs[idx_min]
+        mid_y = (Y0 + Y1) / 2
+        txt = times_today[idx_min].strftime("%Hh")
+        d.text((x0 - 10, mid_y), txt, font=fonts["info_font"], fill=0)
     # trenner
     d.line((X0+PW,Y0,X0+PW,Y1),fill=0,width=2)
 
