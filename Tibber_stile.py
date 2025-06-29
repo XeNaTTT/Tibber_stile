@@ -18,7 +18,7 @@ from waveshare_epd import epd7in5_V2
 
 # DTU-SN und lokaler API-Endpoint
 DTU_SN = "DTUBI-4143A019CB05"
-API_BASE = "http://localhost:5000"
+API_BASE = "http://127.0.0.1:5000"
 
 def get_historical_pv():
     # Holt 2-Tage-Daten aus der DTU-Historie
