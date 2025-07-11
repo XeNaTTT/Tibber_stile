@@ -18,14 +18,14 @@ except ImportError:
     from backports.zoneinfo import ZoneInfo
 local_tz = ZoneInfo("Europe/Berlin")
 
-# Pfade zum Waveshare-Treiber
+# Waveshare Paths
 sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib')
 sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib/waveshare_epd')
 from waveshare_epd import epd7in5_V2
 
 import api_key
 
-# — Tibber Preis Cache —
+# ---- Tibber Preis-Cache & Query ----
 CACHE_FILE_TODAY     = 'cached_today_price.json'
 CACHE_FILE_YESTERDAY = 'cached_yesterday_price.json'
 
@@ -61,35 +61,6 @@ def get_price_data():
                       json={"query":q}, headers=hdr)
     return r.json()['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
 
-def get_consumption_data():
-    hdr = {"Authorization":"Bearer "+api_key.API_KEY,
-           "Content-Type":"application/json"}
-    q = """
-    { viewer { homes { consumption(resolution:HOURLY,last:48) {
-      nodes { from consumption cost }
-    }}}}
-    """
-    r = requests.post("https://api.tibber.com/v1-beta/gql",
-                      json={"query":q}, headers=hdr)
-    j = r.json()
-    if "data" not in j or "errors" in j:
-        return None
-    return j['data']['viewer']['homes'][0]['consumption']['nodes']
-
-def filter_yesterday_consumption(cons):
-    yd = datetime.date.today() - datetime.timedelta(days=1)
-    out=[]
-    if not cons: return out
-    for r in cons:
-        try:
-            d = datetime.datetime.fromisoformat(r['from'])\
-                   .astimezone(local_tz).date()
-            if d==yd:
-                out.append(r)
-        except:
-            pass
-    return out
-
 def prepare_data(pd):
     today_vals = [s['total']*100 for s in pd['today']]
     lowest_today  = min(today_vals) if today_vals else 0
@@ -116,7 +87,7 @@ def prepare_data(pd):
         "lowest_future_val":lowest_future_val
     }
 
-# — Preis-Chart Helpers —
+# ---- Preis-Chart Drawing (deine bestehenden Funktionen) ----
 def draw_dashed_line(d, x1,y1,x2,y2, **kw):
     dx,dy = x2-x1,y2-y1
     dist = math.hypot(dx,dy)
@@ -132,13 +103,12 @@ def draw_dashed_line(d, x1,y1,x2,y2, **kw):
 
 def draw_two_day_chart(d, left_data, lt, right_data, rt, fonts, mode,
                        area=None):
-    # area = (x0,y0,x1,y1) or full screen
+    # area = (x0,y0,x1,y1) or default
     if area:
         X0,Y0,X1,Y1 = area
     else:
         X0,X1=60,800; Y0,Y1=50,400
     W,H = X1-X0, Y1-Y0; PW=W/2
-
     vals_l = [s['total']*100 for s in left_data]
     vals_r = [s['total']*100 for s in right_data]
     allv=vals_l+vals_r
@@ -168,8 +138,7 @@ def draw_two_day_chart(d, left_data, lt, right_data, rt, fonts, mode,
         d.line((x1,y1,x2,y1),fill=0,width=2); d.line((x2,y1,x2,y2),fill=0,width=2)
     for i,dt in enumerate(times_l):
         if i%2==0:
-            d.text((xL[i],Y1+5),dt.strftime("%Hh"),
-                   font=fonts["small"],fill=0)
+            d.text((xL[i],Y1+5),dt.strftime("%Hh"),font=fonts["small"],fill=0)
 
     # mittlere Linie
     d.line((X0+PW,Y0,X0+PW,Y1),fill=0,width=2)
@@ -185,24 +154,20 @@ def draw_two_day_chart(d, left_data, lt, right_data, rt, fonts, mode,
         d.line((x1,y1,x2,y1),fill=0,width=2); d.line((x2,y1,x2,y2),fill=0,width=2)
     for i,dt in enumerate(times_r):
         if i%2==0:
-            d.text((xR[i],Y1+5),dt.strftime("%Hh"),
-                   font=fonts["small"],fill=0)
-
-    # Annotations (low/high) analog original...
-    # (Aus Platzgründen hier gekürzt, verwende deine bestehende Logik.)
+            d.text((xR[i],Y1+5),dt.strftime("%Hh"),font=fonts["small"],fill=0)
 
 def draw_subtitle_labels(d,fonts,mode):
-    # unverändert
+    # dein bestehender Code hier
     pass
 
 def draw_info_box(d,data,fonts):
-    # unverändert
+    # dein bestehender Code hier
     pass
 
-# — PV Stacked-Area Chart unter Preis-Chart —
+# ---- PV Stacked-Area Chart unten ----
 DB_FILE = "/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/pv_data.db"
 
-def draw_pv_stacked(d, fonts, y0, y1):
+def draw_pv_stacked(d, fonts, y0, y1, width):
     import pandas as pd
     today = datetime.date.today()
     start_ts = int(datetime.datetime.combine(today, datetime.time.min).timestamp())
@@ -217,36 +182,36 @@ def draw_pv_stacked(d, fonts, y0, y1):
     df['ts'] = pd.to_datetime(df['ts'], unit='s')
     df.set_index('ts', inplace=True)
     df = df.resample('15T').mean().fillna(0)
-    w = epd.width
+
     h = y1 - y0
     df['stack'] = df['pv1_power'] + df['pv2_power']
     vmax = df['stack'].max() or 1.0
 
-    pts1 = []
-    pts2 = []
+    pts1, pts2 = [], []
     for i,(ts,row) in enumerate(df.iterrows()):
-        x = int(i * w/(len(df)-1))
+        x = int(i * width/(len(df)-1))
         y1p = y1 - int((row['pv1_power']/vmax)*h)
-        y2p = y1 - int((row['stack']/vmax)*h)
+        y2p = y1 - int((row['stack']    /vmax)*h)
         pts1.append((x, y1p))
         pts2.append((x, y2p))
 
-    # pv1 Fläche
-    poly1 = [(0,y1)] + pts1 + [(w-1,y1)]
+    # pv1 Fläche (schwarz)
+    poly1 = [(0,y1)] + pts1 + [(width-1,y1)]
     d.polygon(poly1, fill=0)
-    # pv2 als Loch
-    poly2 = [(0,y1)] + pts2 + [(w-1,y1)]
+    # pv2 Fläche (weiss ausschneiden)
+    poly2 = [(0,y1)] + pts2 + [(width-1,y1)]
     d.polygon(poly2, fill=255)
 
-    # Achsen
+    # X-Achse: jede Stunde
     for ts in df.index:
         if ts.minute==0:
             idx = df.index.get_loc(ts)
-            x = int(idx * w/(len(df)-1))
+            x = int(idx * width/(len(df)-1))
             d.line((x,y1,x,y1+4), fill=0)
-            d.text((x-12,y1+6), ts.strftime("%H:%M"),
+            d.text((x-15,y1+6), ts.strftime("%H:%M"),
                    font=fonts["small"], fill=0)
-    # Y-Labels
+
+    # Y-Achse-Labels
     for frac,label in [(0,"0W"),(0.5,f"{vmax/2:.0f}W"),(1,f"{vmax:.0f}W")]:
         y = y1 - int(frac*h)
         d.line((0,y,4,y), fill=0)
@@ -254,7 +219,8 @@ def draw_pv_stacked(d, fonts, y0, y1):
 
 def main():
     epd = epd7in5_V2.EPD()
-    epd.init(); epd.Clear()
+    epd.init()
+    epd.Clear()
 
     img = Image.new('1', (epd.width, epd.height), 255)
     d   = ImageDraw.Draw(img)
@@ -264,7 +230,7 @@ def main():
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",14)
     }
 
-    # — Preis-Chart oben —
+    # 1) Preis-Chart oben
     pd = get_price_data()
     update_price_cache(pd)
     cy = get_cached_yesterday()
@@ -283,12 +249,11 @@ def main():
     draw_two_day_chart(d, left_data, "price",
                        right_data,"price", fonts, mode,
                        area=(0,0,epd.width,clip_y))
-    # draw_subtitle_labels & draw_info_box unverändert
     draw_subtitle_labels(d, fonts, mode)
     draw_info_box(d, info, fonts)
 
-    # — PV-Stapel-Flächen unten —
-    draw_pv_stacked(d, fonts, clip_y, epd.height)
+    # 2) PV-Stapel-Flächen unten
+    draw_pv_stacked(d, fonts, clip_y, epd.height, epd.width)
 
     # Footer
     now = datetime.datetime.now(local_tz)\
