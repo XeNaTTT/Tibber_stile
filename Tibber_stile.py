@@ -18,7 +18,7 @@ from waveshare_epd import epd7in5_V2
 
 import api_key
 
-# ---- Tibber-Preis-Cache & Abfrage ----
+# ---- Tibber Preis-Cache & Abfrage ----
 CACHE_TODAY     = 'cached_today_price.json'
 CACHE_YESTERDAY = 'cached_yesterday_price.json'
 
@@ -94,49 +94,55 @@ def draw_dashed_line(d, x1,y1,x2,y2, **kw):
 
 def draw_two_day_chart(d, left_data, lt, right_data, rt, fonts, mode, area):
     X0,Y0,X1,Y1 = area
-    W,H = X1-X0, Y1-Y0; PW=W/2
+    W,H = X1-X0, Y1-Y0
+    PW = W/2
     vals_l = [s['total']*100 for s in left_data]
     vals_r = [s['total']*100 for s in right_data]
     allv = vals_l+vals_r
-    if allv:
-        vmin,vmax = min(allv)-0.5, max(allv)+0.5
-    else:
-        vmin,vmax = 0,1
+    vmin,vmax = (min(allv)-0.5, max(allv)+0.5) if allv else (0,1)
     sy = H/(vmax-vmin)
+
     # Y-Achse
-    step = 5; yv = math.floor(vmin/step)*step
+    step=5; yv=math.floor(vmin/step)*step
     while yv<=vmax:
-        y = Y1-(yv-vmin)*sy
+        y=Y1-(yv-vmin)*sy
         d.line((X0-5,y,X0,y),fill=0); d.line((X1,y,X1+5,y),fill=0)
         d.text((X0-45,y-7),f"{yv/100:.2f}",font=fonts["small"],fill=0)
-        yv += step
+        yv+=step
     d.text((X0-45,Y0-20),"Preis (ct/kWh)",font=fonts["small"],fill=0)
+
     # linkes Panel
-    times_l=[datetime.datetime.fromisoformat(s["startsAt"]).astimezone(local_tz) for s in left_data]
+    times_l=[datetime.datetime.fromisoformat(s["startsAt"]).astimezone(local_tz)
+             for s in left_data]
     nL=len(times_l)
     xL=[X0+i*(PW/(nL-1)) for i in range(nL)] if nL>1 else [X0]
     for i in range(nL-1):
         x1,y1=xL[i],Y1-(vals_l[i]-vmin)*sy
         x2,y2=xL[i+1],Y1-(vals_l[i+1]-vmin)*sy
-        d.line((x1,y1,x2,y1),fill=0,width=2); d.line((x2,y1,x2,y2),fill=0,width=2)
+        d.line((x1,y1,x2,y1),fill=0,width=2)
+        d.line((x2,y1,x2,y2),fill=0,width=2)
     for i,dt in enumerate(times_l):
         if i%2==0:
             d.text((xL[i],Y1+5),dt.strftime("%Hh"),font=fonts["small"],fill=0)
-    # Mitte
+
+    # Mittel-Linie
     d.line((X0+PW,Y0,X0+PW,Y1),fill=0,width=2)
+
     # rechtes Panel
-    times_r=[datetime.datetime.fromisoformat(s["startsAt"]).astimezone(local_tz) for s in right_data]
+    times_r=[datetime.datetime.fromisoformat(s["startsAt"]).astimezone(local_tz)
+             for s in right_data]
     nR=len(times_r)
     xR=[X0+PW+i*(PW/(nR-1)) for i in range(nR)] if nR>1 else [X0+PW]
     for i in range(nR-1):
         x1,y1=xR[i],Y1-(vals_r[i]-vmin)*sy
         x2,y2=xR[i+1],Y1-(vals_r[i+1]-vmin)*sy
-        d.line((x1,y1,x2,y1),fill=0,width=2); d.line((x2,y1,x2,y2),fill=0,width=2)
+        d.line((x1,y1,x2,y1),fill=0,width=2)
+        d.line((x2,y1,x2,y2),fill=0,width=2)
     for i,dt in enumerate(times_r):
         if i%2==0:
             d.text((xR[i],Y1+5),dt.strftime("%Hh"),font=fonts["small"],fill=0)
 
-def draw_subtitle_labels(d,fonts,mode):
+def draw_subtitle_labels(d, fonts, mode):
     bf = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",12)
     X0,X1=60,800; PW=(X1-X0)/2; y=415
     if mode=="future":
@@ -146,7 +152,7 @@ def draw_subtitle_labels(d,fonts,mode):
         d.text((X0+10,y),"Preise gestern",font=bf,fill=0)
         d.text((X0+PW+10,y),"Preis heute",font=bf,fill=0)
 
-def draw_info_box(d,data,fonts):
+def draw_info_box(d, data, fonts):
     X0,X1=60,800; y=440
     bf=ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",12)
     infos=[
@@ -159,34 +165,32 @@ def draw_info_box(d,data,fonts):
     for i,t in enumerate(infos):
         d.text((X0+i*w+5,y),t,font=bf,fill=0)
 
-# ---- PV-Linien-Chart Funktionen ----
-DB_FILE = "/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/pv_data.db"
+# ---- PV-Linien-Chart ----
+DB_FILE="/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/pv_data.db"
 
 def draw_pv_lines(d, fonts, y0, y1, width):
     import pandas as pd
-    today = datetime.date.today()
-    start_ts = int(datetime.datetime.combine(today, datetime.time.min).timestamp())
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query(
+    today=datetime.date.today()
+    start_ts=int(datetime.datetime.combine(today,datetime.time.min).timestamp())
+    conn=sqlite3.connect(DB_FILE)
+    df=pd.read_sql_query(
       "SELECT ts,pv1_power,pv2_power FROM pv_log WHERE ts>=? ORDER BY ts",
       conn, params=(start_ts,)
     )
     conn.close()
-    print(f"[DEBUG] PV rows today: {len(df)}")
 
+    # Fallback
     if df.empty:
-        idx = pd.date_range(
-          start=datetime.datetime.combine(today,datetime.time.min),
-          periods=96, freq='15T'
-        )
-        df = pd.DataFrame({'pv1_power':0.0,'pv2_power':0.0}, index=idx)
+        idx=pd.date_range(start=datetime.datetime.combine(today,datetime.time.min),
+                          periods=96, freq='15T')
+        df=pd.DataFrame({'pv1_power':0.0,'pv2_power':0.0}, index=idx)
     else:
         df['ts']=pd.to_datetime(df['ts'],unit='s')
         df.set_index('ts',inplace=True)
         df=df.resample('15T').mean().fillna(0)
 
     df['total']=df['pv1_power']+df['pv2_power']
-    h = y1-y0
+    h=y1-y0
     vmax=df['total'].max() or 1.0
     n=len(df)
     xs=[int(i*width/(n-1)) for i in range(n)]
@@ -213,8 +217,7 @@ def draw_pv_lines(d, fonts, y0, y1, width):
 
 # ---- Main ----
 def main():
-    epd=epd7in5_V2.EPD()
-    epd.init(); epd.Clear()
+    epd=epd7in5_V2.EPD(); epd.init(); epd.Clear()
 
     img=Image.new('1',(epd.width,epd.height),255)
     d=ImageDraw.Draw(img)
@@ -223,13 +226,13 @@ def main():
       "info_font":ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",14)
     }
 
-    # 1) Preis-Chart
+    # Preis-Chart oben
     pd=get_price_data()
     update_price_cache(pd)
     cy=get_cached_yesterday()
     info=prepare_data(pd)
     if pd['tomorrow'] and pd['tomorrow'][0]['total'] is not None:
-        mode='future'; left, right=pd['today'],pd['tomorrow']
+        mode='future'; left,right=pd['today'],pd['tomorrow']
     else:
         mode='historical'
         ydata=cy.get('data',[]) if cy else []
@@ -242,7 +245,7 @@ def main():
     draw_subtitle_labels(d,fonts,mode)
     draw_info_box(d,info,fonts)
 
-    # 2) PV-Linien-Chart unten
+    # PV-Linien-Chart unten
     draw_pv_lines(d,fonts,clip_y,epd.height,epd.width)
 
     # Footer
