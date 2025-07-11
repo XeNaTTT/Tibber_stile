@@ -140,20 +140,27 @@ DB_FILE = "/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/pv_data.db"
 def load_pv_from_db(date):
     import pandas as pd
     start = datetime.datetime.combine(date, datetime.time.min).timestamp()
-    end   = datetime.datetime.combine(date, datetime.time.max).timestamp()
+    end   = datetime.datetime.combine(date,   datetime.time.max).timestamp()
     conn = sqlite3.connect(DB_FILE)
+    # ohne date_parser einlesen
     df = pd.read_sql_query(
         "SELECT ts, pv_power FROM pv_log WHERE ts BETWEEN ? AND ? ORDER BY ts",
         conn,
-        params=(start,end),
-        parse_dates=["ts"],
-        date_parser=lambda x: datetime.datetime.fromtimestamp(int(x))
+        params=(start, end)
     )
     conn.close()
-    if df.empty: return []
-    df.set_index("ts",inplace=True)
-    df = df.resample("15T").mean().fillna(0)
+    if df.empty:
+        # Erzeugt einen DataFrame mit 96 Nullen (15-min-Intervalle) über den ganzen Tag
+        idx = pd.date_range(start=date, periods=96, freq='15T')
+        return [(ts.to_pydatetime(), 0.0) for ts in idx]
+    # Timestamp-Spalte in datetime umwandeln und als Index setzen
+    df['ts'] = pd.to_datetime(df['ts'], unit='s')
+    df.set_index('ts', inplace=True)
+    # 15-Minuten-Resample (Mittelwert) und fehlende mit 0 auffüllen
+    df = df.resample('15T').mean().fillna(0)
+    # Liste von (datetime, Wert)
     return list(df.itertuples(index=True, name=None))
+
 
 def draw_pv_panels(d, fonts):
     # lade Daten
