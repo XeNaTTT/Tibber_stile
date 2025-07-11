@@ -122,11 +122,8 @@ def draw_two_day_chart(d, left, lt, right, rt, fonts, mode, area):
     # linkes Panel: gestern
     times_l = [datetime.datetime.fromisoformat(s["startsAt"]).astimezone(local_tz)
                for s in left]
-    nL, xL = len(times_l), None
-    if nL > 1:
-        xL = [X0 + i*(PW/(nL-1)) for i in range(nL)]
-    else:
-        xL = [X0]
+    nL = len(times_l)
+    xL = [X0 + i*(PW/(nL-1)) for i in range(nL)] if nL>1 else [X0]
     for i in range(nL-1):
         x1,y1 = xL[i],   Y1-(vals_l[i]-vmin)*sy
         x2,y2 = xL[i+1], Y1-(vals_l[i+1]-vmin)*sy
@@ -143,11 +140,8 @@ def draw_two_day_chart(d, left, lt, right, rt, fonts, mode, area):
     # rechtes Panel: heute
     times_r = [datetime.datetime.fromisoformat(s["startsAt"]).astimezone(local_tz)
                for s in right]
-    nR, xR = len(times_r), None
-    if nR > 1:
-        xR = [X0+PW + i*(PW/(nR-1)) for i in range(nR)]
-    else:
-        xR = [X0+PW]
+    nR = len(times_r)
+    xR = [X0+PW + i*(PW/(nR-1)) for i in range(nR)] if nR>1 else [X0+PW]
     for i in range(nR-1):
         x1,y1 = xR[i],   Y1-(vals_r[i]-vmin)*sy
         x2,y2 = xR[i+1], Y1-(vals_r[i+1]-vmin)*sy
@@ -180,7 +174,7 @@ def draw_info_box(d, info, fonts):
     for i,t in enumerate(infos):
         d.text((X0+i*w+5, y), t, font=bf, fill=0)
 
-# ---- PV-Chart (gestern & heute: pv1, pv2, dtu_power) ----
+# ---- PV-Chart ----
 DB_FILE = "/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/pv_data.db"
 
 def draw_two_day_pv(d, fonts, area):
@@ -194,7 +188,7 @@ def draw_two_day_pv(d, fonts, area):
         st = int(datetime.datetime.combine(date, datetime.time.min).timestamp())
         en = int(datetime.datetime.combine(date, datetime.time.max).timestamp())
         conn = sqlite3.connect(DB_FILE)
-        df = pd.read_sql_query(
+        df   = pd.read_sql_query(
             "SELECT ts,pv1_power,pv2_power,dtu_power FROM pv_log "
             "WHERE ts BETWEEN ? AND ? ORDER BY ts",
             conn, params=(st,en)
@@ -202,7 +196,7 @@ def draw_two_day_pv(d, fonts, area):
         conn.close()
         df['ts'] = pd.to_datetime(df['ts'], unit='s')
         df.set_index('ts', inplace=True)
-        # Resample & fill NaN→0
+        # Resample & sicher 0 statt NaN
         return df.resample('15T').mean().fillna(0)
 
     today     = datetime.date.today()
@@ -210,15 +204,13 @@ def draw_two_day_pv(d, fonts, area):
     df_y = load_day(yesterday)
     df_t = load_day(today)
 
-    # Aktuelle Viertelstunde (naiv)
-    now_floor = datetime.datetime.now().replace(
-        minute=(datetime.datetime.now().minute//15)*15,
-        second=0, microsecond=0
-    )
-    # Chart nur bis jetzt_floor
+    # auf letzte volle Viertelstunde beschränken
+    now = datetime.datetime.now()
+    now_floor = now.replace(minute=(now.minute//15)*15,
+                             second=0, microsecond=0)
     df_t = df_t[df_t.index <= now_floor]
 
-    # jetzt keine NaNs mehr
+    # Nun sind df_y und df_t komplett ohne NaN
     vmax = max(df_y['dtu_power'].max(),
                df_t['dtu_power'].max(), 0) + 20
 
@@ -232,6 +224,7 @@ def draw_two_day_pv(d, fonts, area):
         ]:
             pts = []
             for i,val in enumerate(df[series].tolist()):
+                # val ist garantiert ein float, kein NaN
                 x = ox + (i*(PW/(n-1)) if n>1 else PW/2)
                 y = Y1 - int((val/vmax)*H)
                 pts.append((x,y))
@@ -262,16 +255,18 @@ def draw_two_day_pv(d, fonts, area):
 # ---- Main ----
 def main():
     epd = epd7in5_V2.EPD()
-    epd.init(); epd.Clear()
+    epd.init()
+    epd.Clear()
 
     img = Image.new('1', (epd.width, epd.height), 255)
     d   = ImageDraw.Draw(img)
     fonts = {
         "small"    : ImageFont.load_default(),
-        "info_font": ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+        "info_font": ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
     }
 
-    # 1) Preis oben
+    # 1) Preis-Chart oben
     price_info = get_price_data()
     update_price_cache(price_info)
     cy         = get_cached_yesterday()
@@ -286,7 +281,7 @@ def main():
     draw_subtitle_labels(d, fonts, 'historical')
     draw_info_box(d, info, fonts)
 
-    # 2) PV unten
+    # 2) PV-Chart unten
     lower = (0, epd.height//2, epd.width, epd.height)
     draw_two_day_pv(d, fonts, area=lower)
 
@@ -295,7 +290,8 @@ def main():
     d.text((10, epd.height-20), now_str, font=fonts["small"], fill=0)
 
     epd.display(epd.getbuffer(img))
-    epd.sleep(); time.sleep(30)
+    epd.sleep()
+    time.sleep(30)
 
 if __name__=="__main__":
     main()
