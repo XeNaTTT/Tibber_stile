@@ -18,7 +18,7 @@ from waveshare_epd import epd7in5_V2
 
 import api_key
 
-# ---- Tibber Preis-Cache & Abfrage ----
+# -- Tibber Preis-Cache & Abfrage --
 CACHE_TODAY     = 'cached_today_price.json'
 CACHE_YESTERDAY = 'cached_yesterday_price.json'
 
@@ -67,7 +67,7 @@ def prepare_data(pd):
     future     = [(dt,val) for dt,val in slots if dt>=cur_dt]
     if future:
         ft,fv = min(future, key=lambda x: x[1])
-        hours   = round((ft-cur_dt).total_seconds()/3600)
+        hours  = round((ft-cur_dt).total_seconds()/3600)
     else:
         hours,fv = 0,0
     return {
@@ -78,7 +78,7 @@ def prepare_data(pd):
         "lowest_future_val":fv
     }
 
-# ---- Chart-Helfer ----
+# -- Chart-Helfer --
 def draw_dashed_line(d, x1,y1,x2,y2, **kw):
     dx,dy = x2-x1, y2-y1
     dist  = math.hypot(dx,dy)
@@ -103,11 +103,11 @@ def draw_two_day_chart(d, left_data, lt, right_data, rt, fonts, mode, area):
     sy     = H/(vmax-vmin)
 
     # Y-Achse
-    step = 5; yv = math.floor(vmin/step)*step
+    step=5; yv=math.floor(vmin/step)*step
     while yv<=vmax:
         y = Y1-(yv-vmin)*sy
         d.line((X0-5,y,X0,y),fill=0); d.line((X1,y,X1+5,y),fill=0)
-        d.text((X0-45,y-7),f"{yv/100:.2f}",font=fonts["small"],fill=0)
+        d.text((X0-45,y-7),f"{yv/100:.2f}", font=fonts["small"],fill=0)
         yv+=step
     d.text((X0-45,Y0-20),"Preis (ct/kWh)",font=fonts["small"],fill=0)
 
@@ -119,8 +119,8 @@ def draw_two_day_chart(d, left_data, lt, right_data, rt, fonts, mode, area):
     for i in range(nL-1):
         x1,y1 = xL[i],   Y1-(vals_l[i]-vmin)*sy
         x2,y2 = xL[i+1], Y1-(vals_l[i+1]-vmin)*sy
-        d.line((x1,y1,x2,y1),fill=0,width=2)
-        d.line((x2,y1,x2,y2),fill=0,width=2)
+        d.line((x1,y1,x2,y1), fill=0, width=2)
+        d.line((x2,y1,x2,y2), fill=0, width=2)
     for i,dt in enumerate(times_l):
         if i%2==0:
             d.text((xL[i],Y1+5), dt.strftime("%Hh"), font=fonts["small"], fill=0)
@@ -136,8 +136,8 @@ def draw_two_day_chart(d, left_data, lt, right_data, rt, fonts, mode, area):
     for i in range(nR-1):
         x1,y1 = xR[i],   Y1-(vals_r[i]-vmin)*sy
         x2,y2 = xR[i+1], Y1-(vals_r[i+1]-vmin)*sy
-        d.line((x1,y1,x2,y1),fill=0,width=2)
-        d.line((x2,y1,x2,y2),fill=0,width=2)
+        d.line((x1,y1,x2,y1), fill=0, width=2)
+        d.line((x2,y1,x2,y2), fill=0, width=2)
     for i,dt in enumerate(times_r):
         if i%2==0:
             d.text((xR[i],Y1+5), dt.strftime("%Hh"), font=fonts["small"], fill=0)
@@ -157,12 +157,13 @@ def draw_info_box(d, info, fonts):
         f"Tageshoch:       {info['highest_today']/100:.2f}",
         f"Tiefstpreis in:  {info['hours_to_lowest']}h | {info['lowest_future_val']/100:.2f}"
     ]
-    w = (X1-X0)/len(infos)
+    w=(X1-X0)/len(infos)
     for i,t in enumerate(infos):
         d.text((X0+i*w+5,y), t, font=bf, fill=0)
 
-# ---- PV-Chart: gestern & heute, pv1, pv2, dtu_power ----
-DB_FILE = "/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/pv_data.db"
+
+# -- PV-Chart (gestern & heute, pv1, pv2, dtu_power) --
+DB_FILE="/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/pv_data.db"
 
 def draw_two_day_pv(d, fonts, area):
     import pandas as pd, numpy as np
@@ -183,6 +184,8 @@ def draw_two_day_pv(d, fonts, area):
         conn.close()
         df['ts'] = pd.to_datetime(df['ts'], unit='s', errors='coerce')
         df.set_index('ts', inplace=True)
+        # tz-aware index
+        df.index = df.index.tz_localize(local_tz)
         return df.resample('15T').mean().fillna(0)
 
     today     = datetime.date.today()
@@ -190,14 +193,14 @@ def draw_two_day_pv(d, fonts, area):
     df_y = load_day(yesterday)
     df_t = load_day(today)
 
-    # jetzt auf nächste Viertelstunde abrunden und tz-naive machen
+    # Jetzt auf Viertelstunde abrunden (tz-aware)
     now       = datetime.datetime.now(local_tz)
     delta     = datetime.timedelta(minutes=now.minute % 15,
                                     seconds=now.second,
                                     microseconds=now.microsecond)
-    now_floor = (now - delta).replace(tzinfo=None)
+    now_floor = now - delta  # tz-aware
 
-    # alle Zeiten nach jetzt ausblenden
+    # Alles danach ausblenden
     df_t.loc[df_t.index > now_floor, :] = np.nan
 
     vmax = max(df_y['dtu_power'].max(),
@@ -226,7 +229,7 @@ def draw_two_day_pv(d, fonts, area):
                 else:
                     d.line((x1,y1,x2,y2), fill=0, width=width)
 
-        # X-Ticks jede 2h
+        # X-Ticks alle 2h
         for h in range(0,25,2):
             x = ox + (h/24)*PW
             d.line((x,Y1,x,Y1+4), fill=0)
@@ -236,17 +239,16 @@ def draw_two_day_pv(d, fonts, area):
             y = Y1 - int((v/vmax)*H)
             d.line((ox-5,y,ox,y), fill=0)
             label_x = X0-45 if idx==0 else X0+PW-45
-            d.text((label_x, y-7), f"{int(v)}W", font=fonts["small"], fill=0)
+            d.text((label_x,y-7), f"{int(v)}W", font=fonts["small"], fill=0)
 
-    # Mittel-Trennlinie
+    # Mittellinie
     d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
 
 
-# ---- Main ----
+# -- Main --
 def main():
     epd = epd7in5_V2.EPD()
-    epd.init()
-    epd.Clear()
+    epd.init(); epd.Clear()
 
     img = Image.new('1', (epd.width, epd.height), 255)
     d   = ImageDraw.Draw(img)
@@ -255,7 +257,7 @@ def main():
         "info_font": ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
     }
 
-    # 1) Preis-Chart oben
+    # Preis-Chart
     price_info = get_price_data()
     update_price_cache(price_info)
     cy         = get_cached_yesterday()
@@ -269,7 +271,7 @@ def main():
     draw_subtitle_labels(d, fonts, 'historical')
     draw_info_box(d, info, fonts)
 
-    # 2) PV-Chart unten
+    # PV-Chart
     lower = (0, epd.height//2, epd.width, epd.height)
     draw_two_day_pv(d, fonts, area=lower)
 
@@ -278,8 +280,7 @@ def main():
     d.text((10, epd.height-20), now_str, font=fonts["small"], fill=0)
 
     epd.display(epd.getbuffer(img))
-    epd.sleep()
-    time.sleep(30)
+    epd.sleep(); time.sleep(30)
 
 if __name__=="__main__":
     main()
