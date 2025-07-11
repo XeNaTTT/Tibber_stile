@@ -180,7 +180,7 @@ def draw_pv_panels(d, fonts):
     data_t = load_pv_from_db(today)
 
     # Panel-Koordinaten
-    X0,Y0,X1,Y1 = 60, 420, 800, 780  # unter dem Preisbereich
+    X0,Y0,X1,Y1 = 5, 100, 200, 180  # ueber dem Preisbereich
     W = X1-X0; H = Y1-Y0; PW = W//2
 
     # Achse Y skalieren über beide Panels
