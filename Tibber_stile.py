@@ -182,10 +182,10 @@ def draw_two_day_pv(d, fonts, area):
             conn, params=(st,en)
         )
         conn.close()
+        # parse naive timestamps
         df['ts'] = pd.to_datetime(df['ts'], unit='s', errors='coerce')
         df.set_index('ts', inplace=True)
-        # tz-aware index
-        df.index = df.index.tz_localize(local_tz)
+        # resample + fill
         return df.resample('15T').mean().fillna(0)
 
     today     = datetime.date.today()
@@ -193,14 +193,14 @@ def draw_two_day_pv(d, fonts, area):
     df_y = load_day(yesterday)
     df_t = load_day(today)
 
-    # Jetzt auf Viertelstunde abrunden (tz-aware)
-    now       = datetime.datetime.now(local_tz)
+    # jetzt naiv auf Viertelstunde abrunden
+    now       = datetime.datetime.now()  # naiv
     delta     = datetime.timedelta(minutes=now.minute % 15,
                                     seconds=now.second,
                                     microseconds=now.microsecond)
-    now_floor = now - delta  # tz-aware
+    now_floor = now - delta               # auch naiv
 
-    # Alles danach ausblenden
+    # alle Zeiten danach ausblenden
     df_t.loc[df_t.index > now_floor, :] = np.nan
 
     vmax = max(df_y['dtu_power'].max(),
@@ -229,19 +229,18 @@ def draw_two_day_pv(d, fonts, area):
                 else:
                     d.line((x1,y1,x2,y2), fill=0, width=width)
 
-        # X-Ticks alle 2h
+        # Markierungen
         for h in range(0,25,2):
             x = ox + (h/24)*PW
             d.line((x,Y1,x,Y1+4), fill=0)
             d.text((x-12,Y1+6), f"{h:02d}h", font=fonts["small"], fill=0)
-        # Y-Ticks
         for v in [0, vmax/2, vmax]:
             y = Y1 - int((v/vmax)*H)
             d.line((ox-5,y,ox,y), fill=0)
             label_x = X0-45 if idx==0 else X0+PW-45
             d.text((label_x,y-7), f"{int(v)}W", font=fonts["small"], fill=0)
 
-    # Mittellinie
+    # Mitte
     d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
 
 
