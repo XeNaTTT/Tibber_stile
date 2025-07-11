@@ -23,15 +23,15 @@ CACHE_TODAY     = 'cached_today_price.json'
 CACHE_YESTERDAY = 'cached_yesterday_price.json'
 
 def save_cache(data, fn):
-    with open(fn,'w') as f: json.dump(data,f)
+    with open(fn, 'w') as f: json.dump(data, f)
 def load_cache(fn):
     if os.path.exists(fn):
         with open(fn) as f: return json.load(f)
     return None
 
 def get_price_data():
-    hdr = {"Authorization":"Bearer "+api_key.API_KEY,
-           "Content-Type":"application/json"}
+    hdr = {"Authorization": "Bearer " + api_key.API_KEY,
+           "Content-Type": "application/json"}
     q = """
     { viewer { homes { currentSubscription { priceInfo {
       today    { total startsAt }
@@ -40,141 +40,131 @@ def get_price_data():
     }}}}}
     """
     r = requests.post("https://api.tibber.com/v1-beta/gql",
-                      json={"query":q}, headers=hdr)
+                      json={"query": q}, headers=hdr)
     return r.json()['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
 
 def update_price_cache(pd):
     today = datetime.date.today().isoformat()
     ct = load_cache(CACHE_TODAY)
-    if not ct or ct.get('date')!=today:
+    if not ct or ct.get('date') != today:
         if ct: save_cache(ct, CACHE_YESTERDAY)
-        save_cache({"date":today,"data":pd['today']}, CACHE_TODAY)
+        save_cache({"date": today, "data": pd['today']}, CACHE_TODAY)
 
 def get_cached_yesterday():
     return load_cache(CACHE_YESTERDAY)
 
 def prepare_data(pd):
-    today_vals = [s['total']*100 for s in pd['today']]
+    today_vals = [s['total'] * 100 for s in pd['today']]
     lowest = min(today_vals) if today_vals else 0
-    highest= max(today_vals) if today_vals else 0
+    highest = max(today_vals) if today_vals else 0
     cur_dt = datetime.datetime.fromisoformat(pd['current']['startsAt']).astimezone(local_tz)
-    cur_price = pd['current']['total']*100
-    slots = [(datetime.datetime.fromisoformat(s['startsAt']).astimezone(local_tz), s['total']*100)
-             for s in pd['today']+pd['tomorrow']]
-    future = [(dt,val) for dt,val in slots if dt>=cur_dt]
+    cur_price = pd['current']['total'] * 100
+    slots = [(datetime.datetime.fromisoformat(s['startsAt']).astimezone(local_tz), s['total'] * 100)
+             for s in pd['today'] + pd['tomorrow']]
+    future = [(dt, val) for dt, val in slots if dt >= cur_dt]
     if future:
-        ft,fv = min(future, key=lambda x:x[1])
-        hours = round((ft-cur_dt).total_seconds()/3600)
+        ft, fv = min(future, key=lambda x: x[1])
+        hours = round((ft - cur_dt).total_seconds() / 3600)
     else:
-        hours,fv = 0,0
+        hours, fv = 0, 0
     return {
-        "current_price":cur_price,
+        "current_price": cur_price,
         "lowest_today": lowest,
-        "highest_today":highest,
-        "hours_to_lowest":hours,
-        "lowest_future_val":fv
+        "highest_today": highest,
+        "hours_to_lowest": hours,
+        "lowest_future_val": fv
     }
 
-# ---- Preis-Chart ----
-def draw_dashed_line(d, x1,y1,x2,y2, **kw):
-    dx,dy = x2-x1, y2-y1
-    dist = math.hypot(dx,dy)
-    if dist==0: return
-    dl,gl = kw.get("dash_length",4), kw.get("gap_length",4)
-    step = dl+gl
-    for i in range(int(dist/step)+1):
-        s = i*step; e = min(s+dl, dist)
-        rs,re = s/dist, e/dist
-        xa,ya = x1+dx*rs, y1+dy*rs
-        xb,yb = x1+dx*re, y1+dy*re
-        d.line((xa,ya,xb,yb), fill=kw.get("fill",0), width=kw.get("width",1))
+# ---- Preis-Chart Helpers ----
+def draw_dashed_line(d, x1, y1, x2, y2, **kw):
+    dx, dy = x2 - x1, y2 - y1
+    dist = math.hypot(dx, dy)
+    if dist == 0: return
+    dl, gl = kw.get("dash_length", 4), kw.get("gap_length", 4)
+    step = dl + gl
+    for i in range(int(dist / step) + 1):
+        s = i * step; e = min(s + dl, dist)
+        rs, re = s / dist, e / dist
+        xa, ya = x1 + dx * rs, y1 + dy * rs
+        xb, yb = x1 + dx * re, y1 + dy * re
+        d.line((xa, ya, xb, yb), fill=kw.get("fill", 0), width=kw.get("width", 1))
 
 def draw_two_day_chart(d, left_data, lt, right_data, rt, fonts, mode, area):
-    X0,Y0,X1,Y1 = area
-    W,H = X1-X0, Y1-Y0; PW=W/2
-    vals_l = [s['total']*100 for s in left_data]
-    vals_r = [s['total']*100 for s in right_data]
-    allv = vals_l+vals_r
-    vmin,vmax = (min(allv)-0.5, max(allv)+0.5) if allv else (0,1)
-    sy = H/(vmax-vmin)
+    X0, Y0, X1, Y1 = area
+    W, H = X1 - X0, Y1 - Y0; PW = W / 2
+    vals_l = [s['total'] * 100 for s in left_data]
+    vals_r = [s['total'] * 100 for s in right_data]
+    allv = vals_l + vals_r
+    vmin, vmax = (min(allv) - 0.5, max(allv) + 0.5) if allv else (0, 1)
+    sy = H / (vmax - vmin)
     # Y-Achse
-    step=5; yv=math.floor(vmin/step)*step
-    while yv<=vmax:
-        y=Y1-(yv-vmin)*sy
-        d.line((X0-5,y,X0,y),fill=0); d.line((X1,y,X1+5,y),fill=0)
-        d.text((X0-45,y-7),f"{yv/100:.2f}",font=fonts["small"],fill=0)
-        yv+=step
-    d.text((X0-45,Y0-20),"Preis (ct/kWh)",font=fonts["small"],fill=0)
+    step = 5; yv = math.floor(vmin / step) * step
+    while yv <= vmax:
+        y = Y1 - (yv - vmin) * sy
+        d.line((X0 - 5, y, X0, y), fill=0); d.line((X1, y, X1 + 5, y), fill=0)
+        d.text((X0 - 45, y - 7), f"{yv/100:.2f}", font=fonts["small"], fill=0)
+        yv += step
+    d.text((X0 - 45, Y0 - 20), "Preis (ct/kWh)", font=fonts["small"], fill=0)
     # linkes Panel
-    times_l=[datetime.datetime.fromisoformat(s["startsAt"]).astimezone(local_tz) for s in left_data]
-    nL=len(times_l)
-    xL=[X0+i*(PW/(nL-1)) for i in range(nL)] if nL>1 else [X0]
-    for i in range(nL-1):
-        x1,y1=xL[i],Y1-(vals_l[i]-vmin)*sy
-        x2,y2=xL[i+1],Y1-(vals_l[i+1]-vmin)*sy
-        d.line((x1,y1,x2,y1),fill=0,width=2); d.line((x2,y1,x2,y2),fill=0,width=2)
-    for i,dt in enumerate(times_l):
-        if i%2==0: d.text((xL[i],Y1+5),dt.strftime("%Hh"),font=fonts["small"],fill=0)
+    times_l = [datetime.datetime.fromisoformat(s["startsAt"]).astimezone(local_tz) for s in left_data]
+    nL = len(times_l)
+    xL = [X0 + i * (PW / (nL - 1)) for i in range(nL)] if nL > 1 else [X0]
+    for i in range(nL - 1):
+        x1, y1 = xL[i], Y1 - (vals_l[i] - vmin) * sy
+        x2, y2 = xL[i + 1], Y1 - (vals_l[i + 1] - vmin) * sy
+        d.line((x1, y1, x2, y1), fill=0, width=2)
+        d.line((x2, y1, x2, y2), fill=0, width=2)
+    for i, dt in enumerate(times_l):
+        if i % 2 == 0:
+            d.text((xL[i], Y1 + 5), dt.strftime("%Hh"), font=fonts["small"], fill=0)
     # Mitte
-    d.line((X0+PW,Y0,X0+PW,Y1),fill=0,width=2)
+    d.line((X0 + PW, Y0, X0 + PW, Y1), fill=0, width=2)
     # rechtes Panel
-    times_r=[datetime.datetime.fromisoformat(s["startsAt"]).astimezone(local_tz) for s in right_data]
-    nR=len(times_r)
-    xR=[X0+PW+i*(PW/(nR-1)) for i in range(nR)] if nR>1 else [X0+PW]
-    for i in range(nR-1):
-        x1,y1=xR[i],Y1-(vals_r[i]-vmin)*sy
-        x2,y2=xR[i+1],Y1-(vals_r[i+1]-vmin)*sy
-        d.line((x1,y1,x2,y1),fill=0,width=2); d.line((x2,y1,x2,y2),fill=0,width=2)
-    for i,dt in enumerate(times_r):
-        if i%2==0: d.text((xR[i],Y1+5),dt.strftime("%Hh"),font=fonts["small"],fill=0)
-
-def draw_subtitle_labels(d, fonts, mode):
-    bf = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",12)
-    X0,X1=60,800; PW=(X1-X0)/2; y=415
-    if mode=="future":
-        d.text((X0+10,y),"Preis heute",font=bf,fill=0)
-        d.text((X0+PW+10,y),"Preis morgen",font=bf,fill=0)
-    else:
-        d.text((X0+10,y),"Preise gestern",font=bf,fill=0)
-        d.text((X0+PW+10,y),"Preis heute",font=bf,fill=0)
-
-def draw_info_box(d, data, fonts):
-    X0,X1=60,800; y=440
-    bf=ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",12)
-    infos=[
-      f"Aktueller Preis: {data['current_price']/100:.2f}",
-      f"Tagestief:       {data['lowest_today']/100:.2f}",
-      f"Tageshoch:       {data['highest_today']/100:.2f}",
-      f"Tiefstpreis in:  {data['hours_to_lowest']}h | {data['lowest_future_val']/100:.2f}"
-    ]
-    w=(X1-X0)/len(infos)
-    for i,t in enumerate(infos): d.text((X0+i*w+5,y),t,font=bf,fill=0)
+    times_r = [datetime.datetime.fromisoformat(s["startsAt"]).astimezone(local_tz) for s in right_data]
+    nR = len(times_r)
+    xR = [X0 + PW + i * (PW / (nR - 1)) for i in range(nR)] if nR > 1 else [X0 + PW]
+    for i in range(nR - 1):
+        x1, y1 = xR[i], Y1 - (vals_r[i] - vmin) * sy
+        x2, y2 = xR[i + 1], Y1 - (vals_r[i + 1] - vmin) * sy
+        d.line((x1, y1, x2, y1), fill=0, width=2)
+        d.line((x2, y1, x2, y2), fill=0, width=2)
+    for i, dt in enumerate(times_r):
+        if i % 2 == 0:
+            d.text((xR[i], Y1 + 5), dt.strftime("%Hh"), font=fonts["small"], fill=0)
 
 # ---- PV-Chart (zwei Tage, pv1, pv2, dtu_power) ----
-DB_FILE="/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/pv_data.db"
+DB_FILE = "/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/pv_data.db"
 
 def draw_two_day_pv(d, fonts, area):
     import pandas as pd
-    X0,Y0,X1,Y1 = area
-    W,H = X1-X0, Y1-Y0
-    PW = W/2
+    X0, Y0, X1, Y1 = area
+    W, H = X1 - X0, Y1 - Y0; PW = W / 2
 
     def load_day(date):
-        start = int(datetime.datetime.combine(date,datetime.time.min).timestamp())
-        end   = int(datetime.datetime.combine(date,datetime.time.max).timestamp())
+        start = int(datetime.datetime.combine(date, datetime.time.min).timestamp())
+        end = int(datetime.datetime.combine(date, datetime.time.max).timestamp())
         conn = sqlite3.connect(DB_FILE)
         df = pd.read_sql_query(
-            "SELECT ts,pv1_power,pv2_power,dtu_power FROM pv_log "
+            "SELECT ts, pv1_power, pv2_power, dtu_power FROM pv_log "
             "WHERE ts BETWEEN ? AND ? ORDER BY ts",
-            conn, params=(start,end)
+            conn, params=(start, end)
         )
         conn.close()
-        df['ts']=pd.to_datetime(df['ts'],unit='s',errors='coerce')
-        df.set_index('ts',inplace=True)
-        df = df.resample('15T').mean().fillna(0)
+        df['ts'] = pd.to_datetime(df['ts'], unit='s', errors='coerce')
+        df.set_index('ts', inplace=True)
+        df = df.resample('15T').mean()
+        # Fallback: wenn komplett leer, Dummy-Index
+        if df.empty:
+            idx = pd.date_range(
+                start=datetime.datetime.combine(date, datetime.time.min),
+                periods=96, freq='15T'
+            )
+            df = pd.DataFrame(index=idx, columns=['pv1_power','pv2_power','dtu_power'])
+        # Null für alle NaNs
+        df[['pv1_power','pv2_power','dtu_power']] = df[['pv1_power','pv2_power','dtu_power']].fillna(0)
         return df
 
-    today     = datetime.date.today()
+    today = datetime.date.today()
     yesterday = today - datetime.timedelta(days=1)
     df_y = load_day(yesterday)
     df_t = load_day(today)
@@ -182,79 +172,80 @@ def draw_two_day_pv(d, fonts, area):
     vmax = max(df_y['dtu_power'].max(), df_t['dtu_power'].max(), 0) + 20
 
     for idx, df in enumerate([df_y, df_t]):
-        ox = X0 + idx*PW
+        ox = X0 + idx * PW
         # drei Serien
         for series, (dash, width) in [
-            ('pv1_power', (None,2)),
-            ('pv2_power', (2,1)),
-            ('dtu_power',(None,1))
+            ('pv1_power', (None, 2)),
+            ('pv2_power', (2, 1)),
+            ('dtu_power', (None, 1))
         ]:
-            pts=[]
+            pts = []
             n = len(df)
-            for i, val in enumerate(df[series].fillna(0)):
-                x = ox + (i*PW/(n-1) if n>1 else PW/2)
-                y = Y1 - int((val/vmax)*H)
-                pts.append((x,y))
-            for i in range(len(pts)-1):
-                x1,y1=pts[i]; x2,y2=pts[i+1]
+            for i, val in enumerate(df[series]):
+                x = ox + (i * PW / (n - 1) if n > 1 else PW / 2)
+                y = Y1 - int((val / vmax) * H)
+                pts.append((x, y))
+            for i in range(len(pts) - 1):
+                x1, y1 = pts[i]; x2, y2 = pts[i+1]
                 if dash:
-                    draw_dashed_line(d,x1,y1,x2,y2,dash_length=dash,gap_length=dash,fill=0,width=width)
+                    draw_dashed_line(d, x1, y1, x2, y2,
+                                     dash_length=dash, gap_length=dash,
+                                     fill=0, width=width)
                 else:
-                    d.line((x1,y1,x2,y2), fill=0, width=width)
-
-        # X-Ticks
-        for h in range(0,25,2):
-            frac = h/24; x = ox + frac*PW
-            d.line((x,Y1,x,Y1+4),fill=0)
-            d.text((x-12,Y1+6),f"{h:02d}h",font=fonts["small"],fill=0)
-        # Y-Ticks
-        for v in [0, vmax/2, vmax]:
-            y = Y1 - int((v/vmax)*H)
-            d.line((ox-5,y,ox,y),fill=0)
-            label_x = X0-45 if idx==0 else X0+PW-45
-            d.text((label_x,y-7),f"{int(v)}W",font=fonts["small"],fill=0)
-
-    d.line((X0+PW,Y0,X0+PW,Y1),fill=0,width=2)
+                    d.line((x1, y1, x2, y2), fill=0, width=width)
+        # Achsen
+        for h in range(0, 25, 2):
+            frac = h / 24; x = ox + frac * PW
+            d.line((x, Y1, x, Y1 + 4), fill=0)
+            d.text((x - 12, Y1 + 6), f"{h:02d}h", font=fonts['small'], fill=0)
+        for v in [0, vmax / 2, vmax]:
+            y = Y1 - int((v / vmax) * H)
+            d.line((ox - 5, y, ox, y), fill=0)
+            label_x = X0 - 45 if idx == 0 else X0 + PW - 45
+            d.text((label_x, y - 7), f"{int(v)}W", font=fonts['small'], fill=0)
+    # Trennlinie
+    d.line((X0 + PW, Y0, X0 + PW, Y1), fill=0, width=2)
 
 # ---- Main ----
 def main():
     epd = epd7in5_V2.EPD()
     epd.init(); epd.Clear()
 
-    img = Image.new('1',(epd.width,epd.height),255)
-    d   = ImageDraw.Draw(img)
+    img = Image.new('1', (epd.width, epd.height), 255)
+    d = ImageDraw.Draw(img)
     fonts = {
-      "small":ImageFont.load_default(),
-      "info_font":ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",14)
+        'small': ImageFont.load_default(),
+        'info_font': ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 14)
     }
 
-    # Preis oben
+    # 1) Preis oben (0…240px)
     pd = get_price_data()
     update_price_cache(pd)
     cy = get_cached_yesterday()
     info = prepare_data(pd)
     if pd['tomorrow'] and pd['tomorrow'][0]['total'] is not None:
-        mode='future'; left,right=pd['today'],pd['tomorrow']
+        mode = 'future'; left, right = pd['today'], pd['tomorrow']
     else:
-        mode='historical'
-        ydata=cy.get('data',[]) if cy else []
-        left =[{"startsAt":r.get('startsAt',r.get('from')),"total":r.get('total',0)} for r in ydata]
-        right=pd['today']
+        mode = 'historical'
+        ydata = cy.get('data', []) if cy else []
+        left = [{'startsAt': r.get('startsAt', r.get('from')), 'total': r.get('total', 0)} for r in ydata]
+        right = pd['today']
 
-    upper=(0,0,epd.width,epd.height//2)
-    draw_two_day_chart(d,left,"price",right,"price",fonts,mode,area=upper)
-    draw_subtitle_labels(d,fonts,mode)
-    draw_info_box(d,info,fonts)
+    upper = (0, 0, epd.width, epd.height // 2)
+    draw_two_day_chart(d, left, 'price', right, 'price', fonts, mode, area=upper)
+    draw_subtitle_labels(d, fonts, mode)
+    draw_info_box(d, info, fonts)
 
-    # PV unten
-    lower=(0,epd.height//2,epd.width,epd.height)
-    draw_two_day_pv(d,fonts,area=lower)
+    # 2) PV unten (240…480px)
+    lower = (0, epd.height // 2, epd.width, epd.height)
+    draw_two_day_pv(d, fonts, area=lower)
 
-    now=datetime.datetime.now(local_tz).strftime("Update: %H:%M %d.%m.%Y")
-    d.text((10,epd.height-20),now,font=fonts["small"],fill=0)
+    # Footer
+    now = datetime.datetime.now(local_tz).strftime('Update: %H:%M %d.%m.%Y')
+    d.text((10, epd.height - 20), now, font=fonts['small'], fill=0)
 
     epd.display(epd.getbuffer(img))
     epd.sleep(); time.sleep(30)
 
-if __name__=="__main__":
+if __name__ == '__main__':
     main()
