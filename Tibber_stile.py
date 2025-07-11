@@ -255,6 +255,7 @@ def main():
     # 2) PV-Stapel-Flächen unten
     draw_pv_stacked(d, fonts, clip_y, epd.height, epd.width)
 
+
     # Footer
     now = datetime.datetime.now(local_tz)\
             .strftime("Update: %H:%M %d.%m.%Y")
