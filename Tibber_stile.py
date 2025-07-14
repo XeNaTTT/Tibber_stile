@@ -238,7 +238,7 @@ def main():
     print('PV heute: ', pv_t.tolist())
 
     # Chart auf 60% Höhe
-    upper=(0,0,epd.width,int(epd.height*0.8))
+    upper=(int(epd.width*0.05), 0, int(epd.width*0.95), int(epd.height*0.8))  # chart uses 90% width
     draw_two_day_chart(d,left_price,right_price,fonts,'historical',upper,pv_y,pv_t)
 
     draw_subtitle_labels(d,fonts,'historical')
