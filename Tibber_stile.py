@@ -1,4 +1,4 @@
-```python
+
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
@@ -272,4 +272,4 @@ if __name__ == "__main__":
         main()
     except Exception:
         logging.exception("Ungefangene Ausnahme im Hauptprogramm")
-```
+
