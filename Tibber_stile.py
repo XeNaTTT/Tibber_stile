@@ -89,28 +89,35 @@ def draw_dashed_line(d,x1,y1,x2,y2,**kw):
         d.line((xa,ya,xb,yb),fill=kw.get("fill",0),width=kw.get("width",1))
 
 def draw_two_day_chart(d,left,right,fonts,mode,area,pv_y=None,pv_t=None):
+    # Chart area and dimensions
     X0,Y0,X1,Y1 = area
-    W     = X1 - X0
-    H     = Y1 - Y0
-    PW    = W / 2
+    W = X1 - X0
+    H = Y1 - Y0
+    PW = W / 2
+
     # Price values
-    vals_l=[s['total']*100 for s in left]
-    vals_r=[s['total']*100 for s in right]
-    allp=vals_l+vals_r
-    vmin_p,vmax_p=(min(allp)-0.5,max(allp)+0.5) if allp else (0,1)
-    sy_p=H/(vmax_p-vmin_p)
-    # PV max for overlay
+    vals_l = [s['total']*100 for s in left]
+    vals_r = [s['total']*100 for s in right]
+    allp   = vals_l + vals_r
+    vmin_p, vmax_p = (min(allp)-0.5, max(allp)+0.5) if allp else (0,1)
+    sy_p   = H / (vmax_p - vmin_p)
+
+    # PV overlay scaling
     if pv_y is not None and pv_t is not None:
-        pv_max=max(pv_y.max(),pv_t.max(),1)+20
-        sy_v=H/pv_max
-    # Draw Y-axis price
-    step=5;yv=math.floor(vmin_p/step)*step
-    while yv<=vmax_p:
-        y=Y1-(yv-vmin_p)*sy_p
-        d.line((X0-5,y,X0,y),fill=0);d.line((X1,y,X1+5,y),fill=0)
-        d.text((X0-45,y-7),f"{yv/100:.2f}",font=fonts['small'],fill=0)
-        yv+=step
-    d.text((X0-45,Y0-20),'Preis (ct/kWh)',font=fonts['small'],fill=0)
+        pv_max = max(pv_y.max(), pv_t.max(), 1) + 20
+        sy_v   = H / pv_max
+
+    # Draw Y-axis for price
+    step = 5
+    yv   = math.floor(vmin_p/step) * step
+    while yv <= vmax_p:
+        y = Y1 - (yv - vmin_p) * sy_p
+        d.line((X0-5, y, X0, y), fill=0)
+        d.line((X1, y, X1+5, y), fill=0)
+        d.text((X0-45, y-7), f"{yv/100:.2f}", font=fonts['small'], fill=0)
+        yv += step
+    d.text((X0-45, Y0-20), 'Preis (ct/kWh)', font=fonts['small'], fill=0)
+
     # Left panel
     times_l=[datetime.datetime.fromisoformat(s['startsAt']).astimezone(local_tz) for s in left]
     nL=len(times_l)
