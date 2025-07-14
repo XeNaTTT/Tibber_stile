@@ -13,6 +13,7 @@ import logging
 
 from PIL import Image, ImageDraw, ImageFont
 import pandas as pd
+import numpy as np
 
 # ————————————————————————————————————————————————————————————
 # Logging
@@ -143,15 +144,19 @@ def get_pv_series(slots):
     df = df.resample('15T').mean().ffill().fillna(0)
     df.index = df.index.tz_localize(local_tz)
 
+    last_ts = df.index.max()
     vals = []
     for s in slots:
         try:
             t = s['startsAt']
             dt = t if isinstance(t, datetime.datetime) else datetime.datetime.fromisoformat(t).astimezone(local_tz)
-            v = df['dtu_power'].asof(dt)
-            vals.append(float(v) if not pd.isna(v) else 0.0)
+            if dt <= last_ts:
+                v = df['dtu_power'].asof(dt)
+                vals.append(float(v) if not pd.isna(v) else 0.0)
+            else:
+                vals.append(np.nan)
         except Exception:
-            vals.append(0.0)
+            vals.append(np.nan)
     return pd.Series(vals)
 
 
@@ -255,25 +260,33 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area, pv_y=None, pv_t=N
                 yv = Y1 - (vals[i] - vmin)*sy_p
                 d.text((mx-12, yv-12), f"{vals[i]/100:.2f}", font=fonts['small'], fill=0)
 
-        # PV-Overlay nur, wenn pv_vals und sy_v vorhanden sind
-        if sy_v and pv_vals is not None and len(pv_vals)==n:
-            pts = [(xs[i], Y1 - int(pv_vals.iloc[i]*sy_v)) for i in range(n)]
-            for a,b in zip(pts, pts[1:]):
-                draw_dashed_line(d, a[0],a[1], b[0],b[1], dash_length=2, gap_length=2)
-            imax = int(pv_vals.idxmax())
-            xm, ym = pts[imax]
-            d.text((xm-15, ym-15), f"{int(pv_vals.iloc[imax])}W", font=fonts['small'], fill=0)
+        # PV-Overlay nur, wenn pv_vals und sy_v vorhanden und nicht-NaN
+        if sy_v and pv_vals is not None:
+            pts = []
+            for i in range(n):
+                if not np.isnan(pv_vals.iloc[i]):
+                    pts.append((xs[i], Y1 - int(pv_vals.iloc[i]*sy_v)))
+                else:
+                    pts.append(None)
+            # Linien nur zwischen gültigen Punkten
+            for a, b in zip(pts, pts[1:]):
+                if a and b:
+                    draw_dashed_line(d, a[0],a[1], b[0],b[1], dash_length=2, gap_length=2)
+            # Peak-Markierung auf gültigen Werten
+            valid_i = [i for i in range(n) if not np.isnan(pv_vals.iloc[i])]
+            if valid_i:
+                imax = int(pv_vals.iloc[valid_i].idxmax())
+                xm, ym = xs[imax], Y1 - int(pv_vals.iloc[imax]*sy_v)
+                d.text((xm-15, ym-15), f"{int(pv_vals.iloc[imax])}W", font=fonts['small'], fill=0)
 
         # Zeitachse
         for i, dt in enumerate(times):
             if i%2==0:
                 d.text((xs[i], Y1+18), dt.strftime('%Hh'), font=fonts['small'], fill=0)
 
-    # links
+    # zeichne beide Panels
     draw_panel(times_l, vals_l, pv_y, X0)
-    # Mittellinie
     d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
-    # rechts
     draw_panel(times_r, vals_r, pv_t, X0+PW)
 
 
