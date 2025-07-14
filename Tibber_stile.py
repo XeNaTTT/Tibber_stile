@@ -89,10 +89,10 @@ def draw_dashed_line(d,x1,y1,x2,y2,**kw):
         d.line((xa,ya,xb,yb),fill=kw.get("fill",0),width=kw.get("width",1))
 
 def draw_two_day_chart(d,left,right,fonts,mode,area,pv_y=None,pv_t=None):
-    X0,Y0,X1,Y1=area
-    W=X1-X0
-    H=Y1-Y0
-    PW=W/2
+    X0,Y0,X1,Y1 = area
+    W     = X1 - X0
+    H     = Y1 - Y0
+    PW    = W / 2
     # Price values
     vals_l=[s['total']*100 for s in left]
     vals_r=[s['total']*100 for s in right]
