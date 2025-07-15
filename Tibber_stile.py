@@ -87,14 +87,27 @@ def get_pv_series(slots):
     return series
 
 def draw_dashed_line(d, x1, y1, x2, y2, **kw):
-    dx,dy = x2-x1, y2-y1; dist=math.hypot(dx,dy)
-    dl,gl = kw.get('dash_length',4),kw.get('gap_length',4); step=dl+gl
-    for i in range(int(dist/step)+1): s=i*step; e=min(s+dl,dist)
-        rs, re = s/dist, e/dist
-        xa,ya = x1+dx*rs, y1+dy*rs; xb,yb = x1+dx*re, y1+dy*re
-        d.line((xa,ya,xb,yb),fill=kw.get('fill',0))
+    dx = x2 - x1
+    dy = y2 - y1
+    dist = math.hypot(dx, dy)
+    if dist == 0:
+        return
+    dl = kw.get('dash_length', 4)
+    gl = kw.get('gap_length', 4)
+    step = dl + gl
+    for i in range(int(dist / step) + 1):
+        s = i * step
+        e = min(s + dl, dist)
+        rs = s / dist
+        re = e / dist
+        xa = x1 + dx * rs
+        ya = y1 + dy * rs
+        xb = x1 + dx * re
+        yb = y1 + dy * re
+        d.line((xa, ya, xb, yb), fill=kw.get('fill', 0), width=kw.get('width', 1))
 
-def draw_info_box(d,info,fonts,y):
+# --- next function ---
+def draw_info_box(d,info,fonts,y):(d,info,fonts,y):
     logging.debug(f"Drawing info box at y={y}")
     draw_list = [f"Preis jetzt: {info['current_price']/100:.2f}", f"Tief: {info['lowest_today']/100:.2f}", f"Hoch: {info['highest_today']/100:.2f}"]
     for i,text in enumerate(draw_list): d.text((10+i*100,y), text, font=fonts['small'], fill=0)
