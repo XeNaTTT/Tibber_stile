@@ -202,7 +202,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area, pv_y=None, pv_t=N
                  pv_t.max() if pv_t is not None else 0)
     syv = H / (pv_max + 20) if pv_max > 0 else None
 
-    # y-axis
+    # y-axis ticks
     step = 5
     yv = math.floor(vmin/step) * step
     while yv <= vmax:
@@ -215,45 +215,53 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area, pv_y=None, pv_t=N
 
     # subtitles
     bf = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",12)
-    d.text((X0+5, Y1+5),     subtitles[0], font=bf, fill=0)
-    d.text((X0+PW+5, Y1+5),  subtitles[1], font=bf, fill=0)
+    d.text((X0+5, Y1+5), subtitles[0], font=bf, fill=0)
+    d.text((X0+PW+5, Y1+5), subtitles[1], font=bf, fill=0)
 
     def panel(times, vals, pv_vals, x0):
         n = len(times)
-        if n<2: return
+        if n < 2:
+            return
         xs = [x0 + i*(PW/(n-1)) for i in range(n)]
+
         # price line
         for i in range(n-1):
             x1, y1 = xs[i],   Y1 - (vals[i]   - vmin)*sy
             x2, y2 = xs[i+1], Y1 - (vals[i+1] - vmin)*sy
             d.line((x1,y1,x2,y1), fill=0, width=2)
             d.line((x2,y1,x2,y2), fill=0, width=2)
-        # label min/max
+
+        # only min/max labels
         idx_min = vals.index(min(vals))
         idx_max = vals.index(max(vals))
         for idx in (idx_min, idx_max):
             xi = xs[idx]
             yi = Y1 - (vals[idx] - vmin)*sy
             d.text((xi-12, yi-12), f"{vals[idx]/100:.2f}", font=fonts['small'], fill=0)
+
         # pv overlay
         if syv and pv_vals is not None:
-            pts = [(xs[i], Y1 - int(pv_vals.iloc[i]*syv)) if not np.isnan(pv_vals.iloc[i]) else None
-                   for i in range(n)]
-            for a,b in zip(pts, pts[1:]):
+            pts = []
+            for i in range(n):
+                if not np.isnan(pv_vals.iloc[i]):
+                    pts.append((xs[i], Y1 - int(pv_vals.iloc[i]*syv)))
+                else:
+                    pts.append(None)
+            for a, b in zip(pts, pts[1:]):
                 if a and b:
-                    draw_dashed_line(d, a[0],a[1], b[0],b[1], dash_length=2, gap_length=2)
-            valid = [i for i,p in enumerate(pv_vals) if not np.isnan(p)]
+                    draw_dashed_line(d, a[0], a[1], b[0], b[1], dash_length=2, gap_length=2)
+            valid = [i for i, _ in enumerate(pv_vals) if pts[i]]
             if valid:
                 imax = max(valid, key=lambda i: pv_vals.iloc[i])
                 xm, ym = pts[imax]
                 d.text((xm-15, ym-15), f"{int(pv_vals.iloc[imax])}W", font=fonts['small'], fill=0)
-        # time axis
-        for i, dt in enumerate(times):
-            if i%2==0:
-                d.text((xs[i], Y1+18), dt.strftime('%Hh'), font=fonts['small'], fill=0)
 
-    # draw both panels
-    panel(times_l, vals_l, pv_y,    X0)
+        # time axis
+        for i, dt_obj in enumerate(times):
+            if i % 2 == 0:
+                d.text((xs[i], Y1+18), dt_obj.strftime('%Hh'), font=fonts['small'], fill=0)
+
+    panel(times_l, vals_l, pv_y, X0)
     d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
     panel(times_r, vals_r, pv_t, X0+PW)
 
@@ -262,7 +270,10 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area, pv_y=None, pv_t=N
 # ==================================
 
 def main():
-    epd = epd7in5_V2.EPD(); epd.init(); epd.Clear()
+    epd = epd7in5_V2.EPD()
+    epd.init()
+    epd.Clear()
+
     pi = get_price_data()
     if not pi:
         logging.error("Keine Preisdaten")
