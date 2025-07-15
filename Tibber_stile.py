@@ -107,7 +107,7 @@ def draw_dashed_line(d, x1, y1, x2, y2, **kw):
         d.line((xa, ya, xb, yb), fill=kw.get('fill', 0), width=kw.get('width', 1))
 
 # --- next function ---
-def draw_info_box(d,info,fonts,y):(d,info,fonts,y):
+def draw_info_box(d, info, fonts, y):
     logging.debug(f"Drawing info box at y={y}")
     draw_list = [f"Preis jetzt: {info['current_price']/100:.2f}", f"Tief: {info['lowest_today']/100:.2f}", f"Hoch: {info['highest_today']/100:.2f}"]
     for i,text in enumerate(draw_list): d.text((10+i*100,y), text, font=fonts['small'], fill=0)
