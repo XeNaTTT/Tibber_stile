@@ -27,7 +27,7 @@ DB_FILE         = '/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/pv_data.d
 CACHE_TODAY     = '/home/alex/E-Paper-tibber-Preisanzeige/cached_today_price.json'
 CACHE_YESTERDAY = '/home/alex/E-Paper-tibber-Preisanzeige/cached_yesterday_price.json'
 
-# Waveshare E-Paper Import
+# Waveshare E‑Paper
 sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib')
 sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib/waveshare_epd')
 from waveshare_epd import epd7in5_V2
@@ -35,10 +35,7 @@ from waveshare_epd import epd7in5_V2
 # API-Key
 import api_key
 
-# Logging (to console for debugging)
-logging.basicConfig(level=logging.DEBUG)
-
-# --- Helper-Funktionen ---
+logging.basicConfig(level=logging.INFO)
 
 def save_cache(data, fn):
     with open(fn, 'w') as f:
@@ -52,11 +49,15 @@ def load_cache(fn):
 
 def get_price_data():
     hdr = {"Authorization": f"Bearer {api_key.API_KEY}"}
-    query = '''{ viewer { homes { currentSubscription { priceInfo { today { total startsAt } tomorrow { total startsAt } current { total startsAt } }}}}}'''
-    r = requests.post("https://api.tibber.com/v1-beta/gql", json={"query": query}, headers=hdr)
-    data = r.json()['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
-    logging.debug(f"Price data: {data}")
-    return data
+    query = '''{ viewer { homes { currentSubscription { priceInfo {
+        today    { total startsAt }
+        tomorrow { total startsAt }
+        current  { total startsAt }
+    }}}}}'''
+    r = requests.post("https://api.tibber.com/v1-beta/gql",
+                      json={"query": query}, headers=hdr, timeout=15)
+    r.raise_for_status()
+    return r.json()['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
 
 def update_price_cache(pi):
     today = dt.date.today().isoformat()
@@ -70,148 +71,142 @@ def get_cached_yesterday():
     return load_cache(CACHE_YESTERDAY) or {"data": []}
 
 def prepare_data(pi):
-    logging.debug("Preparing data...")
     today = [s['total']*100 for s in pi['today']]
+    lowest  = min(today) if today else 0
+    highest = max(today) if today else 0
+    cur = pi['current']
+    cur_dt    = dt.datetime.fromisoformat(cur['startsAt']).astimezone(local_tz)
+    cur_price = cur['total']*100
     return {
-        'current_price':   pi['current']['total']*100,
-        'lowest_today':    min(today),
-        'highest_today':   max(today),
-        'hours_to_lowest': 0,
-        'lowest_future_val': 0
+        'current_price': cur_price,
+        'current_dt':    cur_dt,
+        'lowest_today':  lowest,
+        'highest_today': highest
     }
 
 def get_pv_series(slots):
     conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT ts,dtu_power FROM pv_log", conn)
+    df = pd.read_sql_query("SELECT ts, dtu_power FROM pv_log", conn)
     conn.close()
     df['ts'] = pd.to_datetime(df['ts'], unit='s')
     df.set_index('ts', inplace=True)
     df = df.resample('15T').mean().ffill().fillna(0)
     df.index = df.index.tz_localize(local_tz)
-
     pts = []
-    for sl in slots:
-        dt_obj = dt.datetime.fromisoformat(sl['startsAt']).astimezone(local_tz)
-        pts.append(df['dtu_power'].asof(dt_obj))
-    series = pd.Series(pts)
-    logging.debug(f"PV series length {len(series)}: {series.tolist()}")
-    return series
+    for s in slots:
+        dt_obj = dt.datetime.fromisoformat(s['startsAt']).astimezone(local_tz)
+        v = df['dtu_power'].asof(dt_obj)
+        pts.append(float(v) if not pd.isna(v) else 0.0)
+    return pd.Series(pts)
 
 def draw_dashed_line(d, x1, y1, x2, y2, **kw):
-    dx = x2 - x1
-    dy = y2 - y1
-    dist = math.hypot(dx, dy)
+    dx, dy = x2 - x1, y2 - y1
+    dist   = math.hypot(dx, dy)
     if dist == 0:
         return
     dl = kw.get('dash_length', 4)
     gl = kw.get('gap_length', 4)
     step = dl + gl
-    for i in range(int(dist / step) + 1):
-        s = i * step
-        e = min(s + dl, dist)
-        rs = s / dist
-        re = e / dist
-        xa = x1 + dx * rs
-        ya = y1 + dy * rs
-        xb = x1 + dx * re
-        yb = y1 + dy * re
-        d.line((xa, ya, xb, yb), fill=kw.get('fill', 0), width=kw.get('width', 1))
+    for i in range(int(dist/step) + 1):
+        s = i*step
+        e = min(s+dl, dist)
+        rs = s/dist
+        re = e/dist
+        xa = x1 + dx*rs
+        ya = y1 + dy*rs
+        xb = x1 + dx*re
+        yb = y1 + dy*re
+        d.line((xa, ya, xb, yb), fill=kw.get('fill',0), width=1)
 
 def draw_info_box(d, info, fonts, y):
-    logging.debug(f"Drawing info box at y={y}")
-    draw_list = [
+    X0, X1 = 60, epd7in5_V2.EPD().width
+    bf = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",12)
+    texts = [
         f"Preis jetzt: {info['current_price']/100:.2f}",
         f"Tief: {info['lowest_today']/100:.2f}",
         f"Hoch: {info['highest_today']/100:.2f}"
     ]
-    for i, text in enumerate(draw_list):
-        d.text((10 + i*120, y), text, font=fonts['small'], fill=0)
+    w = (X1 - X0) / len(texts)
+    for i, t in enumerate(texts):
+        d.text((X0 + i*w + 5, y), t, font=bf, fill=0)
 
-def draw_two_day_chart(d, left, right, fonts, subtitles, area, pv_y=None, pv_t=None, label_min_max=False):
+def draw_two_day_chart(d, left, right, fonts, subtitles, area,
+                       pv_y=None, pv_t=None, cur_dt=None, cur_price=None):
     X0, Y0, X1, Y1 = area
     W, H = X1 - X0, Y1 - Y0
-    PW = W / 2
+    PW   = W / 2
 
     def extract(slots):
-        times, prices = [], []
+        ts, ps = [], []
         for s in slots:
-            try:
-                dt_obj = dt.datetime.fromisoformat(s['startsAt']).astimezone(local_tz)
-                times.append(dt_obj)
-                prices.append(s['total'] * 100)
-            except:
-                continue
-        return times, prices
+            dt_obj = dt.datetime.fromisoformat(s['startsAt']).astimezone(local_tz)
+            ts.append(dt_obj)
+            ps.append(s['total'] * 100)
+        return ts, ps
 
-    times_l, vals_l = extract(left)
-    times_r, vals_r = extract(right)
-    all_prices = vals_l + vals_r
-    if not all_prices:
+    tl, vl = extract(left)
+    tr, vr = extract(right)
+    allp = vl + vr
+    if not allp:
         return
 
-    vmin, vmax = min(all_prices) - 0.5, max(all_prices) + 0.5
-    sy = H / (vmax - vmin)
+    vmin, vmax = min(allp) - 0.5, max(allp) + 0.5
+    sy  = H / (vmax - vmin)
+    pmax = 0
+    if pv_y is not None: pmax = max(pmax, pv_y.max())
+    if pv_t is not None: pmax = max(pmax, pv_t.max())
+    syv = H / (pmax + 20) if pmax > 0 else None
 
-    pv_max = 0
-    if pv_y is not None: pv_max = max(pv_max, pv_y.max())
-    if pv_t is not None: pv_max = max(pv_max, pv_t.max())
-    syv = H / (pv_max + 20) if pv_max > 0 else None
-
-    # draw y-axis
+    # y-axis
     step = 5
-    yv = math.floor(vmin / step) * step
+    yv = math.floor(vmin/step)*step
     while yv <= vmax:
-        yy = Y1 - (yv - vmin) * sy
-        d.line((X0-5, yy, X0, yy), fill=0)
-        d.line((X1, yy, X1+5, yy), fill=0)
-        d.text((X0-45, yy-7), f"{yv/100:.2f}", font=fonts['small'], fill=0)
+        yy = Y1 - (yv - vmin)*sy
+        d.line((X0-5,yy,X0,yy),fill=0); d.line((X1,yy,X1+5,yy),fill=0)
+        d.text((X0-45,yy-7),f"{yv/100:.2f}",font=fonts['small'],fill=0)
         yv += step
-    d.text((X0-45, Y0-20), "Preis (ct/kWh)", font=fonts['small'], fill=0)
+    d.text((X0-45,Y0-20),'Preis (ct/kWh)',font=fonts['small'],fill=0)
 
-    bf = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
-    d.text((X0+5, Y1+5),     subtitles[0], font=bf, fill=0)
-    d.text((X0+PW+5, Y1+5),  subtitles[1], font=bf, fill=0)
+    bf = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",12)
+    d.text((X0+5,Y1+5),    subtitles[0], font=bf, fill=0)
+    d.text((X0+PW+5,Y1+5), subtitles[1], font=bf, fill=0)
 
-    def panel(times, vals, pv_vals, x0):
-        n = len(times)
-        if n < 2:
-            return
+    def panel(ts, ps, pv_vals, x0):
+        n = len(ts)
+        if n < 2: return
         xs = [x0 + i*(PW/(n-1)) for i in range(n)]
+        # price lines
         for i in range(n-1):
-            x1, y1 = xs[i],   Y1 - (vals[i]   - vmin)*sy
-            x2, y2 = xs[i+1], Y1 - (vals[i+1] - vmin)*sy
+            x1, y1 = xs[i],   Y1 - (ps[i]   - vmin)*sy
+            x2, y2 = xs[i+1], Y1 - (ps[i+1] - vmin)*sy
             d.line((x1,y1,x2,y1), fill=0, width=2)
             d.line((x2,y1,x2,y2), fill=0, width=2)
-        idx_min = vals.index(min(vals))
-        idx_max = vals.index(max(vals))
-        for idx in (idx_min, idx_max):
-            xi, yi = xs[idx], Y1 - (vals[idx] - vmin)*sy
-            d.text((xi-12, yi-12), f"{vals[idx]/100:.2f}", font=fonts['small'], fill=0)
+        # min/max labels
+        for idx in (ps.index(min(ps)), ps.index(max(ps))):
+            xi, yi = xs[idx], Y1 - (ps[idx] - vmin)*sy
+            d.text((xi-12, yi-12), f"{ps[idx]/100:.2f}", font=fonts['small'], fill=0)
+        # PV overlay
         if syv and pv_vals is not None:
-            pts = []
-            for i in range(n):
-                if not np.isnan(pv_vals.iloc[i]):
-                    pts.append((xs[i], Y1 - int(pv_vals.iloc[i]*syv)))
-                else:
-                    pts.append(None)
+            pts = [(xs[i], Y1 - int(pv_vals.iloc[i]*syv)) if not np.isnan(pv_vals.iloc[i]) else None
+                  for i in range(n)]
             for a, b in zip(pts, pts[1:]):
                 if a and b:
-                    draw_dashed_line(d, a[0], a[1], b[0], b[1], dash_length=2, gap_length=2)
-            valid = [i for i in range(n) if pts[i]]
-            if valid:
-                imax = max(valid, key=lambda i: pv_vals.iloc[i])
-                xm, ym = pts[imax]
-                d.text((xm-15, ym-15), f"{int(pv_vals.iloc[imax])}W", font=fonts['small'], fill=0)
-        for i, t in enumerate(times):
-            if i % 2 == 0:
-                d.text((xs[i], Y1+18), t.strftime("%Hh"), font=fonts['small'], fill=0)
+                    draw_dashed_line(d, a[0],a[1], b[0],b[1], dash_length=2, gap_length=2)
 
-    panel(times_l, vals_l, pv_y,    X0)
-    d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
-    panel(times_r, vals_r, pv_t, X0+PW)
+    panel(tl, vl, pv_y, X0)
+    d.line((X0+PW,Y0,X0+PW,Y1), fill=0, width=2)
+    panel(tr, vr, pv_t, X0+PW)
 
-# --- Hauptprogramm für Debug ---
-if __name__ == '__main__':
+    # current price marker (filled circle)
+    if cur_dt and cur_price is not None and tr:
+        idx = next((i for i,t in enumerate(tr) if t.hour == cur_dt.hour), None)
+        if idx is not None and len(tr) > 1:
+            pos_x = X0 + PW + idx*(PW/(len(tr)-1))
+            pos_y = Y1 - (cur_price - vmin)*sy
+            r = 4
+            d.ellipse((pos_x-r, pos_y-r, pos_x+r, pos_y+r), fill=0)
+
+def main():
     epd = epd7in5_V2.EPD()
     epd.init()
     epd.Clear()
@@ -223,25 +218,34 @@ if __name__ == '__main__':
     tomorrow = pi.get('tomorrow', [])
     if tomorrow:
         left, right = pi['today'], tomorrow
+        labels = ("Heute","Morgen")
     else:
-        left, right = get_cached_yesterday().get('data', []), pi['today']
+        left, right = get_cached_yesterday()['data'], pi['today']
+        labels = ("Gestern","Heute")
 
-    pv_left = get_pv_series(left)
+    pv_left  = get_pv_series(left)
+    pv_right = get_pv_series(right)
 
     w, h = epd.width, epd.height
-    mx = int(w * 0.05)
+    mx   = int(w*0.05)
+
     img = Image.new('1', (w, h), 255)
-    d = ImageDraw.Draw(img)
+    d   = ImageDraw.Draw(img)
     fonts = {'small': ImageFont.load_default()}
 
     draw_info_box(d, info, fonts, 20)
     draw_two_day_chart(
-        d, left, right, fonts,
-        ("Gestern" if not tomorrow else "Heute", "Heute" if not tomorrow else "Morgen"),
-        (mx, 40, w-mx, h-30),
-        pv_y=pv_left
+        d, left, right, fonts, labels, (mx, 40, w-mx, h-30),
+        pv_y= pv_left, pv_t= pv_right,
+        cur_dt= info['current_dt'], cur_price= info['current_price']
     )
 
-    img.save('/home/alex/debug_epaper.png')
-    print("Debug image saved to /home/alex/debug_epaper.png")
-    sys.exit(0)
+    # Footer timestamp
+    ts = dt.datetime.now(local_tz).strftime("Update: %H:%M %d.%m.%Y")
+    d.text((10, h-20), ts, font=fonts['small'], fill=0)
+
+    epd.display(epd.getbuffer(img))
+    epd.sleep()
+
+if __name__ == "__main__":
+    main()
