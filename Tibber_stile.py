@@ -122,14 +122,37 @@ def draw_two_day_chart(d,left,right,fonts,subs,area,pv_y=None,pv_t=None,label_mi
 
 # --- Hauptprogramm für Debug ---
 if __name__ == '__main__':
-    epd = epd7in5_V2.EPD(); epd.init(); epd.Clear()
-    pi = get_price_data(); update_price_cache(pi)
+    # Initialize EPD (for dimensions)
+    epd = epd7in5_V2.EPD()
+    epd.init()
+    epd.Clear()
+
+    # Fetch and prepare data
+    pi = get_price_data()
+    update_price_cache(pi)
     info = prepare_data(pi)
-    left = pi['today']; right = pi.get('tomorrow',[])
+    left = pi['today']
+    right = pi.get('tomorrow', [])
     pv_left = get_pv_series(left)
-    w,h = epd.width, epd.height; mx=int(w*0.05)
-    img = Image.new('1',(w,h),255); d=ImageDraw.Draw(img)
-    fonts={'small':ImageFont.load_default()}
-    draw_info_box(d,info,fonts,20)
-    draw_two_day_chart(d,left,right,fonts,("L","R"),(mx,40,w-mx,h-30),pv_y=pv_left)
-    epd.display(epd.getbuffer(img)); epd.sleep()
+
+    # Canvas setup
+    w, h = epd.width, epd.height
+    mx = int(w * 0.05)
+    img = Image.new('1', (w, h), 255)
+    d = ImageDraw.Draw(img)
+    fonts = {'small': ImageFont.load_default()}
+
+    # Draw debug info box and chart
+    draw_info_box(d, info, fonts, 20)
+    draw_two_day_chart(
+        d, left, right, fonts,
+        ("L","R"),
+        (mx, 40, w-mx, h-30),
+        pv_y=pv_left
+    )
+
+    # Save debug image to filesystem rather than EPD
+    debug_path = '/home/alex/debug_epaper.png'
+    img.save(debug_path)
+    print(f'Debug image saved to {debug_path}')
+    sys.exit(0)
