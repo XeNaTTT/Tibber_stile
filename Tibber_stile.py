@@ -131,8 +131,17 @@ if __name__ == '__main__':
     pi = get_price_data()
     update_price_cache(pi)
     info = prepare_data(pi)
-    left = pi['today']
-    right = pi.get('tomorrow', [])
+
+    # Determine panels based on tomorrow data
+    tomorrow = pi.get('tomorrow', [])
+    if tomorrow:
+        left = pi['today']
+        right = tomorrow
+    else:
+        left = get_cached_yesterday().get('data', [])
+        right = pi['today']
+
+    # Get PV series for left (yesterday or today)
     pv_left = get_pv_series(left)
 
     # Canvas setup
@@ -146,7 +155,7 @@ if __name__ == '__main__':
     draw_info_box(d, info, fonts, 20)
     draw_two_day_chart(
         d, left, right, fonts,
-        ("L","R"),
+        ("Links","Rechts"),
         (mx, 40, w-mx, h-30),
         pv_y=pv_left
     )
