@@ -215,20 +215,29 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     panel(tr, vr, pv_t, X0+PW)
 
     # Marker: gefüllter Kreis auf aktuellem Preis plus Label
-    if cur_dt and cur_price is not None:
-        # Index der aktuellen Stunde im rechten Panel suchen
-        idx = next((i for i, t in enumerate(tr) if t.hour == cur_dt.hour), None)
-        if idx is not None and len(tr) > 1:
-            # x‑Position berechnen
-            px = X0 + PW + idx * (PW / (len(tr) - 1))
-            # y‑Position exakt auf der Preis‑Kurve
+    if cur_dt is not None and cur_price is not None:
+        # Wenn morgen-Modus, Marker im linken Panel, sonst im rechten
+        if subtitles[1] == "Morgen":
+            ts_used, x0 = tl, X0
+        else:
+            ts_used, x0 = tr, X0 + PW
+
+        # Finde den Slot mit gleicher Stunde
+        idx = next((i for i, t in enumerate(ts_used) if t.hour == cur_dt.hour), None)
+        if idx is not None and len(ts_used) > 1:
+            # x-Position im Panel
+            px = x0 + idx * (PW / (len(ts_used) - 1))
+            # y-Position exakt auf der Preis-Kurve
             py = Y1 - (cur_price - vmin) * sy
             r = 4
-            # gefüllter Kreis
-            d.ellipse((px - r, py - r, px + r, py + r), fill=0)
+            # Kreis zeichnen
+            d.ellipse((px-r, py-r, px+r, py+r), fill=0)
             # Label mit aktuellem Preis (ct/kWh)
-            price_txt = f"{cur_price / 100:.2f}"
-            d.text((px + r + 2, py - r - 2), price_txt, font=fonts['small'], fill=0)
+            price_txt = f"{cur_price/100:.2f}"
+            d.text((px + r + 2, py - r - 2),
+                   price_txt,
+                   font=fonts['small'],
+                   fill=0)
 
 def main():
     epd = epd7in5_V2.EPD()
