@@ -209,7 +209,18 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                 pts.append((xs[i], Y1 - int(v*syv)))
             for a, b in zip(pts, pts[1:]):
                 draw_dashed_line(d, a[0], a[1], b[0], b[1], dash_length=2, gap_length=2)
-
+    # PV-Min-/Max-Labels
+    # pv_list enthält die (evtl. auf 0 gesetzten) PV-Werte
+    pv_list = [pv_vals.iloc[i] if not pd.isna(pv_vals.iloc[i]) else 0.0 for i in range(n)]
+    if any(v > 0 for v in pv_list):
+        # Index des niedrigsten und höchsten PV-Ertrags
+        idx_min = pv_list.index(min(pv_list))
+        idx_max = pv_list.index(max(pv_list))
+        for idx in (idx_min, idx_max):
+            xi = xs[idx]
+            yi = Y1 - int(pv_list[idx] * syv)
+            d.text((xi-15, yi-15), f"{int(pv_list[idx])}W", font=fonts['small'], fill=0)
+            
     panel(tl, vl, pv_y, X0)
     d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
     panel(tr, vr, pv_t, X0+PW)
