@@ -214,14 +214,21 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
     panel(tr, vr, pv_t, X0+PW)
 
-    # Marker: gefüllter Kreis auf aktuellem Preis
+    # Marker: gefüllter Kreis auf aktuellem Preis plus Label
     if cur_dt and cur_price is not None:
+        # Index der aktuellen Stunde im rechten Panel suchen
         idx = next((i for i, t in enumerate(tr) if t.hour == cur_dt.hour), None)
         if idx is not None and len(tr) > 1:
-            px = X0+PW + idx*(PW/(len(tr)-1))
-            py = Y1 - (cur_price - vmin)*sy
-            r  = 4
-            d.ellipse((px-r, py-r, px+r, py+r), fill=0)
+            # x‑Position berechnen
+            px = X0 + PW + idx * (PW / (len(tr) - 1))
+            # y‑Position exakt auf der Preis‑Kurve
+            py = Y1 - (cur_price - vmin) * sy
+            r = 4
+            # gefüllter Kreis
+            d.ellipse((px - r, py - r, px + r, py + r), fill=0)
+            # Label mit aktuellem Preis (ct/kWh)
+            price_txt = f"{cur_price / 100:.2f}"
+            d.text((px + r + 2, py - r - 2), price_txt, font=fonts['small'], fill=0)
 
 def main():
     epd = epd7in5_V2.EPD()
