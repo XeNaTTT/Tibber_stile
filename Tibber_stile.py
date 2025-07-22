@@ -85,20 +85,31 @@ def prepare_data(pi):
     }
 
 def get_pv_series(slots):
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT ts, dtu_power FROM pv_log", conn)
+    conn   = sqlite3.connect(DB_FILE)
+    df     = pd.read_sql_query("SELECT ts,dtu_power FROM pv_log", conn)
     conn.close()
+
     df['ts'] = pd.to_datetime(df['ts'], unit='s')
     df.set_index('ts', inplace=True)
     df = df.resample('15T').mean().ffill().fillna(0)
     df.index = df.index.tz_localize(local_tz)
-    series = []
-    for s in slots:
-        dt_obj = dt.datetime.fromisoformat(s['startsAt']).astimezone(local_tz)
-        v = df['dtu_power'].asof(dt_obj)
-        series.append(float(v) if not pd.isna(v) else np.nan)
-    return pd.Series(series)
 
+    last_ts = df.index.max()
+    vals    = []
+
+    for s in slots:
+        # Wandeln wir den ISO‑String in datetime um:
+        dt = datetime.datetime.fromisoformat(s['startsAt']).astimezone(local_tz)
+
+        if dt <= last_ts:
+            v = df['dtu_power'].asof(dt)
+            vals.append(float(v) if not pd.isna(v) else 0.0)
+        else:
+            # künftige Zeiten → NaN (oder 0, je nach Wunsch)
+            vals.append(np.nan)
+
+    return pd.Series(vals)
+    
 def get_last_pv_values(n=5):
     """Hole die letzten n Einträge aus der PV-Datenbank."""
     conn = sqlite3.connect(DB_FILE)
