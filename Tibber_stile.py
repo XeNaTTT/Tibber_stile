@@ -103,15 +103,15 @@ def get_pv_series(slots):
     last_ts = df.index.max()
     vals    = []
     for s in slots:
-        # String → dt.datetime
-        dt_obj = dt.datetime.fromisoformat(s['startsAt']).astimezone(local_tz)
-        if dt_obj <= last_ts:
-            v = df['dtu_power'].asof(dt_obj)
+        # String → datetime in lokaler Zeitzone
+        ts = dt.datetime.fromisoformat(s['startsAt']).astimezone(local_tz)
+        if ts <= last_ts:
+            v = df['dtu_power'].asof(ts)
             vals.append(float(v) if not pd.isna(v) else 0.0)
         else:
-            # künftige Zeiten als 0
-            vals.append(0.0)
+            vals.append(np.nan)
     return pd.Series(vals)
+
 
 def draw_dashed_line(d, x1, y1, x2, y2, **kw):
     dx,dy = x2 - x1, y2 - y1
