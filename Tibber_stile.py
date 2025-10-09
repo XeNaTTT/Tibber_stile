@@ -1,235 +1,298 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
 import sys
+import os
+import time
+import math
 import json
 import requests
 import datetime as dt
-import matplotlib.pyplot as plt
+import sqlite3
+import logging
+
 from PIL import Image, ImageDraw, ImageFont
-import math
-
-# E-Paper-Bibliothek
-sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib')
-sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib/waveshare_epd')
-from waveshare_epd import epd7in5_V2
-
-# API-Key
-import api_key
-
-# Display
-EPD_WIDTH, EPD_HEIGHT = 800, 480
+import pandas as pd
+import numpy as np
 
 # Zeitzone
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
     from backports.zoneinfo import ZoneInfo
-TZ = ZoneInfo("Europe/Berlin")
+local_tz = ZoneInfo("Europe/Berlin")
 
-# Fonts
-FONT_SMALL = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
-FONT_BOLD  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+# E-Paper-Bibliothek
+sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib')
+sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib/waveshare_epd')
+from waveshare_epd import epd7in5_V2
 
-# ------------------------------
-# 1. TIBBER: Preis + Verbrauch
-# ------------------------------
-def get_tibber_data():
-    query = """
-    {
-      viewer {
-        homes {
-          currentSubscription {
-            priceInfo {
-              today { total startsAt }
-              tomorrow { total startsAt }
-              current { total startsAt }
-            }
-          }
-          current {
-            power
-            powerProduction
-          }
-        }
-      }
-    }
-    """
-    headers = {
-        "Authorization": f"Bearer {api_key.API_KEY}",
-        "Content-Type": "application/json"
-    }
-    res = requests.post(
-        "https://api.tibber.com/v1-beta/gql",
-        json={"query": query},
-        headers=headers,
-        timeout=15
-    )
-    print("Status:", res.status_code)
-    res.raise_for_status()
-    payload = res.json()
-    if "errors" in payload:
-        raise RuntimeError(payload["errors"])
+import api_key
 
-    home = payload["data"]["viewer"]["homes"][0]
-    price_info = home["currentSubscription"]["priceInfo"]
-    current_power = home["current"]
-    return price_info, current_power
-    
-# ------------------------------
-# 3. ECOFLOW: Batterie-Status
-# ------------------------------
-def get_ecoflow_status():
-    # Platzhalter – ersetze durch echte API/MQTT
+# Pfade & Konfiguration
+DB_FILE         = '/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/pv_data.db'
+CACHE_TODAY     = '/home/alex/E-Paper-tibber-Preisanzeige/cached_today_price.json'
+CACHE_YESTERDAY = '/home/alex/E-Paper-tibber-Preisanzeige/cached_yesterday_price.json'
+
+logging.basicConfig(level=logging.INFO)
+
+
+def save_cache(data, fn):
+    with open(fn, 'w') as f:
+        json.dump(data, f)
+
+
+def load_cache(fn):
+    if os.path.exists(fn):
+        with open(fn) as f:
+            return json.load(f)
+    return None
+
+
+def get_price_data():
+    hdr = {"Authorization": f"Bearer {api_key.API_KEY}"}
+    query = '''
+    { viewer { homes { currentSubscription { priceInfo {
+        today    { total startsAt }
+        tomorrow { total startsAt }
+        current  { total startsAt }
+    }}}}}
+    '''
+    r = requests.post('https://api.tibber.com/v1-beta/gql',
+                      json={"query": query},
+                      headers=hdr,
+                      timeout=15)
+    r.raise_for_status()
+    return r.json()['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
+
+
+def update_price_cache(pi):
+    today = dt.date.today().isoformat()
+    ct = load_cache(CACHE_TODAY)
+    if not ct or ct.get('date') != today:
+        if ct:
+            save_cache(ct, CACHE_YESTERDAY)
+        save_cache({"date": today, "data": pi['today']}, CACHE_TODAY)
+
+
+def get_cached_yesterday():
+    return load_cache(CACHE_YESTERDAY) or {"data": []}
+
+
+def prepare_data(pi):
+    today_vals    = [s['total'] * 100 for s in pi['today']]
+    lowest_today  = min(today_vals) if today_vals else 0
+    highest_today = max(today_vals) if today_vals else 0
+    cur = pi['current']
+    cur_dt    = dt.datetime.fromisoformat(cur['startsAt']).astimezone(local_tz)
+    cur_price = cur['total'] * 100
     return {
-        "soc": 85,
-        "power": -234,
-        "time_remain": 142,
-        "temp": 22
+        'current_dt':    cur_dt,
+        'current_price': cur_price,
+        'lowest_today':  lowest_today,
+        'highest_today': highest_today
     }
 
-# ------------------------------
-# 4. MINI-GRAPH
-# ------------------------------
-def mini_graph(values, size=(200, 100), title=""):
-    fig, ax = plt.subplots(figsize=(size[0]/100, size[1]/100), dpi=100)
-    ax.plot(values, color="black", linewidth=2)
-    ax.set_title(title, fontsize=8)
-    ax.axis('off')
-    fig.tight_layout(pad=0)
-    fig.canvas.draw()
-    img = Image.frombytes('RGB', fig.canvas.get_width_height(), fig.canvas.tostring_rgb()).convert("1")
-    plt.close(fig)
-    return img
 
-# ------------------------------
-# 5. 15-MIN CHART
-# ------------------------------
-def draw_two_day_chart(draw, left, right, area, cur_dt, cur_price):
+def get_pv_series(slots):
+    conn = sqlite3.connect(DB_FILE)
+    df   = pd.read_sql_query("SELECT ts, dtu_power FROM pv_log", conn)
+    conn.close()
+
+    df['ts'] = pd.to_datetime(df['ts'], unit='s')
+    df.set_index('ts', inplace=True)
+    df = df.resample('15T').mean().ffill().fillna(0)
+    df.index = df.index.tz_localize(local_tz)
+
+    last_ts = df.index.max()
+    vals    = []
+    for s in slots:
+        ts = dt.datetime.fromisoformat(s['startsAt']).astimezone(local_tz)
+        if ts <= last_ts:
+            v = df['dtu_power'].asof(ts)
+            vals.append(float(v) if not pd.isna(v) else 0.0)
+        else:
+            # künftige Zeiten als 0, damit Skalierung konstant bleibt
+            vals.append(0.0)
+    return pd.Series(vals)
+
+
+def draw_dashed_line(d, x1, y1, x2, y2, **kw):
+    dx, dy = x2 - x1, y2 - y1
+    dist   = math.hypot(dx, dy)
+    if dist == 0:
+        return
+    dl = kw.get('dash_length', 4)
+    gl = kw.get('gap_length', 4)
+    step = dl + gl
+    for i in range(int(dist/step) + 1):
+        s = i * step
+        e = min(s + dl, dist)
+        rs, re = s/dist, e/dist
+        xa = x1 + dx*rs
+        ya = y1 + dy*rs
+        xb = x1 + dx*re
+        yb = y1 + dy*re
+        d.line((xa, ya, xb, yb), fill=kw.get('fill', 0), width=1)
+
+
+def draw_info_box(d, info, fonts, y):
+    X0, X1 = 60, epd7in5_V2.EPD().width
+    bf = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
+    texts = [
+        f"Preis jetzt: {info['current_price']/100:.2f}",
+        f"Tief heute:  {info['lowest_today']/100:.2f}",
+        f"Hoch heute:  {info['highest_today']/100:.2f}"
+    ]
+    w = (X1 - X0) / len(texts)
+    for i, t in enumerate(texts):
+        d.text((X0 + i*w + 5, y), t, font=bf, fill=0)
+
+
+def draw_two_day_chart(d, left, right, fonts, subtitles, area,
+                       pv_y=None, pv_t=None, cur_dt=None, cur_price=None):
     X0, Y0, X1, Y1 = area
     W, H = X1 - X0, Y1 - Y0
-    PW = W // 2
+    PW   = W / 2
 
     def extract(slots):
         ts_list, val_list = [], []
         for s in slots:
-            ts = dt.datetime.fromisoformat(s['startsAt']).astimezone(TZ)
-            ts_list.append(ts)
+            ts_o = dt.datetime.fromisoformat(s['startsAt']).astimezone(local_tz)
+            ts_list.append(ts_o)
             val_list.append(s['total'] * 100)
         return ts_list, val_list
 
     tl, vl = extract(left)
     tr, vr = extract(right)
-    allp = vl + vr
+    allp   = vl + vr
     if not allp:
         return
 
     vmin, vmax = min(allp) - 0.5, max(allp) + 0.5
-    sy = H / (vmax - vmin)
+    sy   = H / (vmax - vmin)
+    pv_max = 0
+    if pv_y is not None: pv_max = max(pv_max, pv_y.max())
+    if pv_t is not None: pv_max = max(pv_max, pv_t.max())
+    syv = H / (pv_max + 20) if pv_max > 0 else None
 
     # Y-Achse
     step = 5
-    yv = math.floor(vmin / step) * step
+    yv   = math.floor(vmin/step) * step
     while yv <= vmax:
         yy = Y1 - (yv - vmin) * sy
-        draw.line((X0 - 5, yy, X0, yy), fill=0)
-        draw.line((X1, yy, X1 + 5, yy), fill=0)
-        draw.text((X0 - 45, yy - 7), f"{yv / 100:.2f}", font=FONT_SMALL, fill=0)
+        d.line((X0-5, yy, X0, yy), fill=0)
+        d.line((X1, yy, X1+5, yy), fill=0)
+        d.text((X0-45, yy-7), f"{yv/100:.2f}", font=fonts['small'], fill=0)
         yv += step
-    draw.text((X0 - 45, Y0 - 20), 'Preis (ct/kWh)', font=FONT_SMALL, fill=0)
+    d.text((X0-45, Y0-20), 'Preis (ct/kWh)', font=fonts['small'], fill=0)
 
-    # Trenner
-    draw.line((X0 + PW, Y0, X0 + PW, Y1), fill=0, width=2)
+    # Subtitles unter dem Chart
+    bf = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
+    d.text((X0+5,    Y1+5), subtitles[0], font=bf, fill=0)
+    d.text((X0+PW+5, Y1+5), subtitles[1], font=bf, fill=0)
 
-    def panel(ts_list, val_list, x0):
-        n = len(val_list)
+    def panel(ts_list, val_list, pv_list, x0):
+        n = len(ts_list)
         if n < 2:
             return
-        xs = [x0 + i * (PW / (n - 1)) for i in range(n)]
+        xs = [x0 + i*(PW/(n-1)) for i in range(n)]
 
-        # Linie
-        for i in range(n - 1):
-            x1, y1 = xs[i], Y1 - (val_list[i] - vmin) * sy
-            x2, y2 = xs[i + 1], Y1 - (val_list[i + 1] - vmin) * sy
-            draw.line((x1, y1, x2, y1), fill=0, width=2)
-            draw.line((x2, y1, x2, y2), fill=0, width=2)
+        # Preis-Linie
+        for i in range(n-1):
+            x1, y1 = xs[i],   Y1 - (val_list[i]   - vmin)*sy
+            x2, y2 = xs[i+1], Y1 - (val_list[i+1] - vmin)*sy
+            d.line((x1,y1, x2,y1), fill=0, width=2)
+            d.line((x2,y1, x2,y2), fill=0, width=2)
 
-        # Min/Max Label
+        # Preis-Min/Max labeln
         for idx in (val_list.index(min(val_list)), val_list.index(max(val_list))):
-            xi, yi = xs[idx], Y1 - (val_list[idx] - vmin) * sy
-            draw.text((xi - 12, yi - 12), f"{val_list[idx] / 100:.2f}", font=FONT_SMALL, fill=0)
+            xi, yi = xs[idx], Y1 - (val_list[idx] - vmin)*sy
+            d.text((xi-12, yi-12), f"{val_list[idx]/100:.2f}", font=fonts['small'], fill=0)
 
-        # Aktueller Marker (minutengenau)
-        if cur_dt and cur_price is not None:
-            closest = min(range(n), key=lambda i: abs((ts_list[i] - cur_dt).total_seconds()))
-            px = xs[closest]
-            py = Y1 - (cur_price - vmin) * sy
-            r = 4
-            draw.ellipse((px - r, py - r, px + r, py + r), fill=0)
-            draw.text((px + r + 2, py - r - 2), f"{cur_price / 100:.2f}", font=FONT_SMALL, fill=0)
+        # PV-Overlay
+        if syv and pv_list is not None:
+            pts = []
+            for i in range(n):
+                v = pv_list.iloc[i] if not np.isnan(pv_list.iloc[i]) else 0.0
+                pts.append((xs[i], Y1 - int(v * syv)))
+            for a, b in zip(pts, pts[1:]):
+                draw_dashed_line(d, a[0], a[1], b[0], b[1], dash_length=2, gap_length=2)
 
-    # Linkes Panel
-    panel(tl, vl, X0)
-    # Rechtes Panel
-    panel(tr, vr, X0 + PW)
+            # PV-Min/Max labeln
+            pv_vals = [pv_list.iloc[i] if not np.isnan(pv_list.iloc[i]) else 0.0 for i in range(n)]
+            if any(v > 0 for v in pv_vals):
+                i_min = pv_vals.index(min(pv_vals))
+                i_max = pv_vals.index(max(pv_vals))
+                for idx in (i_min, i_max):
+                    xi = xs[idx]
+                    yi = Y1 - int(pv_vals[idx] * syv)
+                    d.text((xi-15, yi-15), f"{int(pv_vals[idx])}W", font=fonts['small'], fill=0)
 
-# ------------------------------
-# 6. HAUPT-FUNKTION
-# ------------------------------
+    # linkes Panel
+    panel(tl, vl, pv_y,    X0)
+    # Trenner
+    d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
+    # rechtes Panel
+    panel(tr, vr, pv_t, X0+PW)
+
+    # Marker und Label
+    if cur_dt and cur_price is not None:
+        # wähle Panel nach „Morgen“-Modus
+        if subtitles[1] == "Morgen":
+            arr, x0 = tl, X0
+        else:
+            arr, x0 = tr, X0+PW
+        idx = next((i for i,t in enumerate(arr) if t.hour == cur_dt.hour), None)
+        if idx is not None and len(arr) > 1:
+            px = x0 + idx * (PW/(len(arr)-1))
+            py = Y1 - (cur_price - vmin)*sy
+            r  = 4
+            d.ellipse((px-r, py-r, px+r, py+r), fill=0)
+            txt = f"{cur_price/100:.2f}"
+            d.text((px + r + 2, py - r - 2), txt, font=fonts['small'], fill=0)
+
+
 def main():
     epd = epd7in5_V2.EPD()
     epd.init()
     epd.Clear()
 
-    # Daten
-    price_info, current_power = get_tibber_data()
-    sunshine = get_weather()
-    eco = get_ecoflow_status()
+    pi   = get_price_data()
+    update_price_cache(pi)
+    info = prepare_data(pi)
 
-    # Bild
-    img = Image.new("1", (EPD_WIDTH, EPD_HEIGHT), 255)
-    draw = ImageDraw.Draw(img)
+    tomorrow = pi.get('tomorrow', [])
+    if tomorrow:
+        left, right = pi['today'], tomorrow
+        labels = ("Heute", "Morgen")
+    else:
+        left, right = get_cached_yesterday()['data'], pi['today']
+        labels = ("Gestern", "Heute")
 
-    # OBEN LINKS: Wetter
-    x0, y0, w, h = 10, 10, 390, 230
-    draw.rectangle([x0, y0, x0 + w, y0 + h], outline=0, width=2)
-    draw.text((x0 + 10, y0 + 5), "Wetter & Sonnenstunden", font=FONT_BOLD, fill=0)
-    draw.text((x0 + 10, y0 + 25), f"Heute: {int(sunshine[0]/60)} min", font=FONT_SMALL, fill=0)
-    draw.text((x0 + 10, y0 + 45), f"Morgen: {int(sunshine[1]/60)} min", font=FONT_SMALL, fill=0)
-    sun_graph = mini_graph([s/60 for s in sunshine], size=(370, 120), title="Sonnenstunden (min)")
-    img.paste(sun_graph, (x0 + 10, y0 + 90))
+    pv_left  = get_pv_series(left)
+    pv_right = get_pv_series(right)
 
-    # OBEN RECHTS: EcoFlow
-    x0, y0, w, h = 410, 10, 380, 230
-    draw.rectangle([x0, y0, x0 + w, y0 + h], outline=0, width=2)
-    draw.text((x0 + 10, y0 + 5), "EcoFlow Stream AC", font=FONT_BOLD, fill=0)
-    draw.text((x0 + 10, y0 + 25), f"SOC: {eco['soc']}%", font=FONT_SMALL, fill=0)
-    draw.text((x0 + 10, y0 + 45), f"Leistung: {eco['power']}W", font=FONT_SMALL, fill=0)
-    draw.text((x0 + 10, y0 + 65), f"Restzeit: {eco['time_remain']} min", font=FONT_SMALL, fill=0)
-    draw.text((x0 + 10, y0 + 85), f"Temperatur: {eco['temp']}°C", font=FONT_SMALL, fill=0)
+    w, h = epd.width, epd.height
+    mx   = int(w * 0.05)
+    img  = Image.new('1', (w, h), 255)
+    d    = ImageDraw.Draw(img)
+    fonts = {'small': ImageFont.load_default()}
 
-    # UNTEN: Strompreis
-    today = price_info["today"]
-    tomorrow = price_info["tomorrow"] or []
+    draw_info_box(d, info, fonts, 20)
     draw_two_day_chart(
-        draw,
-        left=today,
-        right=tomorrow,
-        area=(10, 250, 790, 470),
-        cur_dt=dt.datetime.now(TZ),
-        cur_price=price_info["current"]["total"] * 100
+        d, left, right, fonts, labels, (mx, 40, w-mx, h-30),
+        pv_y= pv_left, pv_t= pv_right,
+        cur_dt= info['current_dt'],
+        cur_price= info['current_price']
     )
 
-    # Verbrauch
-    draw.text((10, 430), f"Verbrauch: {current_power['power']}W | PV: {current_power['powerProduction']}W", font=FONT_SMALL, fill=0)
+    footer = dt.datetime.now(local_tz).strftime("Update: %H:%M %d.%m.%Y")
+    d.text((10, h-20), footer, font=fonts['small'], fill=0)
 
-    # Update-Zeit
-    footer = dt.datetime.now(TZ).strftime("Update: %H:%M %d.%m.%Y")
-    draw.text((10, EPD_HEIGHT - 20), footer, font=FONT_SMALL, fill=0)
-
-    # Display
     epd.display(epd.getbuffer(img))
     epd.sleep()
+
 
 if __name__ == "__main__":
     main()
