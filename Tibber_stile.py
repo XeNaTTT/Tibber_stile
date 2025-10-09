@@ -193,7 +193,7 @@ def sunshine_hours(lat, lon, model=None):
         j = r.json()
         with open("/home/alex/E-Paper-tibber-Preisanzeige/openmeteo_last.json", "w") as f:
             json.dump(j, f, indent=2)
-                sec = (j.get("daily", {}).get("sunshine_duration") or [0])[0]
+            sec = (j.get("daily", {}).get("sunshine_duration") or [0])[0]
         # falls versehentlich mehrere Modelle im JSON: nimm ersten numerischen Wert
         if isinstance(sec, (list, tuple)):
             sec = sec[0] if sec else 0
