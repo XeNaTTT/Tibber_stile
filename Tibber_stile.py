@@ -56,12 +56,16 @@ def get_tibber_data():
     }
     '''
     res = requests.post(
-        "https://api.tibber.com/v1-beta/gql",
+        "https://api.tibber.com/v1-beta/gql",   # ← Leerzeichen entfernt
         json={"query": query},
-        headers={"Authorization": f"Bearer {api_key.API_KEY}"},
+        headers={"Authorization": api_key.API_KEY},  # ← kein "Bearer"
         timeout=15
     )
-    data = res.json()["data"]["viewer"]["homes"][0]["currentSubscription"]
+    res.raise_for_status()
+    payload = res.json()
+    if "errors" in payload:
+        raise RuntimeError(f"Tibber-API-Fehler: {payload['errors']}")
+    data = payload["data"]["viewer"]["homes"][0]["currentSubscription"]
     return data["priceInfo"], data["current"]
 
 # ------------------------------
