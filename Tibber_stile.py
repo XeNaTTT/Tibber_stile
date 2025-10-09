@@ -59,30 +59,22 @@ def get_tibber_data():
         "Authorization": f"Bearer {api_key.API_KEY}",
         "Content-Type": "application/json"
     }
+    print("DEBUG – Header:", headers)          # ?
     res = requests.post(
         "https://api.tibber.com/v1-beta/gql",
         json={"query": query},
         headers=headers,
         timeout=15
     )
-    print("Status:", res.status_code)          # ← Debug
-    print("Antwort:", res.text)                # ← Debug
+    print("DEBUG – Status:", res.status_code)  # ?
+    print("DEBUG – Raw:", res.text)            # ?
     res.raise_for_status()
     payload = res.json()
     if "errors" in payload:
         raise RuntimeError(payload["errors"])
     data = payload["data"]["viewer"]["homes"][0]["currentSubscription"]
     return data["priceInfo"], data["current"]
-# ------------------------------
-# 2. WETTER: Open-Meteo
-# ------------------------------
-def get_weather():
-    lat, lon = 52.5200, 13.4050  # Berlin
-    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=sunshine_duration&timezone=Europe/Berlin"
-    res = requests.get(url, timeout=10)
-    data = res.json()["daily"]
-    return data["sunshine_duration"][:2]  # heute, morgen
-
+    
 # ------------------------------
 # 3. ECOFLOW: Batterie-Status
 # ------------------------------
