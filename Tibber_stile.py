@@ -136,31 +136,55 @@ def get_pv_series(slots_dt):
 def get_consumption_series(slots_dt):
     return series_from_db("consumption_log", "consumption_w", slots_dt)
 
+# ---------- Tibber Consumption (hourly -> 15min) ----------
+def tibber_hourly_consumption(last=48):
+    hdr = {"Authorization": f"Bearer {api_key.API_KEY}", "Content-Type":"application/json"}
+    q = f"""
+    {{ viewer {{ homes {{
+      consumption(resolution: HOURLY, last: {last}) {{
+        nodes {{ from consumption }}
+      }}
+    }}}} }}
+    """
+    r = requests.post("https://api.tibber.com/v1-beta/gql", json={"query": q}, headers=hdr, timeout=15)
+    r.raise_for_status()
+    j = r.json()
+    nodes = j["data"]["viewer"]["homes"][0]["consumption"]["nodes"]
+    out = []
+    for n in nodes:
+        f = dt.datetime.fromisoformat(n["from"]).astimezone(LOCAL_TZ)
+        out.append((f, float(n["consumption"] or 0.0)))
+    return out
+
+def upsample_hourly_to_quarter(ts_15min, hourly_list):
+    import bisect
+    if not hourly_list:
+        return pd.Series([0.0]*len(ts_15min))
+    hours = [t for (t,_) in hourly_list]
+    vals  = [v for (_,v) in hourly_list]  # kWh je Stunde
+    first_ts, last_ts = hours[0], hours[-1]
+    out = []
+    for t in ts_15min:
+        if t < first_ts or t > last_ts:
+            out.append(0.0)
+            continue
+        i = bisect.bisect_right(hours, t) - 1
+        kwh = (vals[i] if i >= 0 else 0.0)
+        out.append(kwh * 1000.0)  # konstante W pro 15-Min Slot
+    return pd.Series(out)
+
 # ---------- Wetter ----------
-def sunshine_hours(lat, lon, model):
-    """
-    Liefert modellierte Sonnenstunden (WMO: sunshine_duration in Sekunden -> Stunden).
-    model: "ecmwf_ifs04" oder "icon_seamless"
-    """
+def sunshine_hours(lat, lon):
     try:
-        url = (
-            "https://api.open-meteo.com/v1/forecast"
-            f"?latitude={lat}&longitude={lon}"
-            "&daily=sunshine_duration&timezone=Europe%2FBerlin"
-            f"&models={model}"
-        )
+        url = ("https://api.open-meteo.com/v1/forecast"
+               f"?latitude={lat}&longitude={lon}"
+               "&daily=sunshine_duration&timezone=Europe%2FBerlin")
         r = requests.get(url, timeout=10)
         r.raise_for_status()
-        j = r.json()
-        # optional zum Nachvollziehen ablegen:
-        with open("/home/alex/E-Paper-tibber-Preisanzeige/openmeteo_last.json", "w") as f:
-            json.dump(j, f, indent=2)
-        sec = (j.get("daily", {}).get("sunshine_duration") or [0])[0]
-        return round((sec or 0) / 3600, 1)
-    except Exception as e:
-        logging.error("Sunshine fetch failed: %s", e)
+        sec = safe_get(r.json(), "daily", "sunshine_duration", default=[0])[0]
+        return round((sec or 0)/3600, 1)
+    except Exception:
         return None
-
 
 # ---------- EcoFlow ----------
 def ecoflow_status():
@@ -279,16 +303,13 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     W,H = X1-X0, Y1-Y0
     PW  = W/2
 
-    # *** HIER: Immer auf 15-Minuten expandieren ***
-    tl, vl = expand_to_15min(left)   # 96 Punkte
-    tr, vr = expand_to_15min(right)  # 96 Punkte
-    if not (vl or vr): 
-        return
+    tl, vl = expand_to_15min(left)
+    tr, vr = expand_to_15min(right)
+    if not (vl or vr): return
 
     allp = vl + vr
     vmin, vmax = min(allp)-0.5, max(allp)+0.5
     sy_price = H/(vmax - vmin if vmax>vmin else 1)
-
 
     def vmax_power(series):
         if series is None: return 0
@@ -406,21 +427,21 @@ def main():
     else:
         left, right = (load_cache(CACHE_YESTERDAY) or {"data": []})['data'], pi['today']
         labels = ("Gestern", "Heute")
-   
+    else:
+        left, right = cached_yesterday()['data'], pi['today']
+        labels = ("Gestern", "Heute")
+
     tl_dt, _ = expand_to_15min(left)
     tr_dt, _ = expand_to_15min(right)
 
     pv_left   = get_pv_series(tl_dt)
     pv_right  = get_pv_series(tr_dt)
-    cons_left = get_consumption_series(tl_dt)
-    cons_right= get_consumption_series(tr_dt)
+    # Tibber: stundenverbrauch laden und auf 15min hochrechnen
+hourly = tibber_hourly_consumption(last=48)
+cons_left  = upsample_hourly_to_quarter(tl_dt, hourly)
+cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
-    sun_h = sunshine_hours(
-    getattr(api_key, "LAT", 52.428),
-    getattr(api_key, "LON", 13.351),
-    getattr(api_key, "SUN_MODEL", "ecmwf_ifs04")
-)
-
+    sun_h = sunshine_hours(getattr(api_key, "LAT", 52.428), getattr(api_key, "LON", 13.351))
     eco   = ecoflow_status()
 
     # Canvas
@@ -444,7 +465,7 @@ def main():
     draw_ecoflow_box(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
 
     # Info-Zeile tiefer
-    draw_info_box(d, info, fonts, y=top_h + margin + 18, width=w-20)
+    draw_info_box(d, info, fonts, y=top_h + margin + 10, width=w-20)
 
     # Chart kleiner in der Hoehe + Platz fuer Stunden
     chart_top = top_h + margin + 40
