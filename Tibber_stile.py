@@ -369,7 +369,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     while yv <= vmax:
         yy = Y1 - (yv - vmin) * sy_price
         if Y0 < yy < Y1:  # strikt innerhalb, keine Linie auf dem Rahmen
-            d.line((X0, yy, X1, yy), fill=0, width=0)
+            #d.line((X0, yy, X1, yy), fill=0, width=0)
             d.text((X0-45, yy-7), f"{yv/100:.2f}", font=fonts['tiny'], fill=0)
         yv += step
 
