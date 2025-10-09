@@ -137,17 +137,30 @@ def get_consumption_series(slots_dt):
     return series_from_db("consumption_log", "consumption_w", slots_dt)
 
 # ---------- Wetter ----------
-def sunshine_hours(lat, lon):
+def sunshine_hours(lat, lon, model):
+    """
+    Liefert modellierte Sonnenstunden (WMO: sunshine_duration in Sekunden -> Stunden).
+    model: "ecmwf_ifs04" oder "icon_seamless"
+    """
     try:
-        url = ("https://api.open-meteo.com/v1/forecast"
-               f"?latitude={lat}&longitude={lon}"
-               "&daily=sunshine_duration&timezone=Europe%2FBerlin")
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            "&daily=sunshine_duration&timezone=Europe%2FBerlin"
+            f"&models={model}"
+        )
         r = requests.get(url, timeout=10)
         r.raise_for_status()
-        sec = safe_get(r.json(), "daily", "sunshine_duration", default=[0])[0]
-        return round((sec or 0)/3600, 1)
-    except Exception:
+        j = r.json()
+        # optional zum Nachvollziehen ablegen:
+        with open("/home/alex/E-Paper-tibber-Preisanzeige/openmeteo_last.json", "w") as f:
+            json.dump(j, f, indent=2)
+        sec = (j.get("daily", {}).get("sunshine_duration") or [0])[0]
+        return round((sec or 0) / 3600, 1)
+    except Exception as e:
+        logging.error("Sunshine fetch failed: %s", e)
         return None
+
 
 # ---------- EcoFlow ----------
 def ecoflow_status():
