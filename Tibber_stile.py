@@ -415,7 +415,12 @@ def main():
     cons_left = get_consumption_series(tl_dt)
     cons_right= get_consumption_series(tr_dt)
 
-    sun_h = sunshine_hours(getattr(api_key, "LAT", 52.428), getattr(api_key, "LON", 13.351))
+    sun_h = sunshine_hours(
+    getattr(api_key, "LAT", 52.428),
+    getattr(api_key, "LON", 13.351),
+    getattr(api_key, "SUN_MODEL", "ecmwf_ifs04")
+)
+
     eco   = ecoflow_status()
 
     # Canvas
