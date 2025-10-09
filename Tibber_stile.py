@@ -390,10 +390,7 @@ def main():
     else:
         left, right = (load_cache(CACHE_YESTERDAY) or {"data": []})['data'], pi['today']
         labels = ("Gestern", "Heute")
-    else:
-        left, right = cached_yesterday()['data'], pi['today']
-        labels = ("Gestern", "Heute")
-
+   
     tl_dt, _ = expand_to_15min(left)
     tr_dt, _ = expand_to_15min(right)
 
