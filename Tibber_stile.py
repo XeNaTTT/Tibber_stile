@@ -36,7 +36,7 @@ FONT_BOLD  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bol
 # 1. TIBBER: Preis + Verbrauch
 # ------------------------------
 def get_tibber_data():
-    query = '''
+    query = """
     {
       viewer {
         homes {
@@ -54,19 +54,27 @@ def get_tibber_data():
         }
       }
     }
-    '''
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key.API_KEY}",   # ← Wichtig: "Bearer " voran!
+        "Content-Type": "application/json"
+    }
     res = requests.post(
-        "https://api.tibber.com/v1-beta/gql",   # ← Leerzeichen entfernt
+        "https://api.tibber.com/v1-beta/gql",          # ← kein Leerzeichen!
         json={"query": query},
-        headers={"Authorization": api_key.API_KEY},  # ← kein "Bearer"
+        headers=headers,
         timeout=15
     )
     res.raise_for_status()
     payload = res.json()
+
     if "errors" in payload:
-        raise RuntimeError(f"Tibber-API-Fehler: {payload['errors']}")
-    data = payload["data"]["viewer"]["homes"][0]["currentSubscription"]
-    return data["priceInfo"], data["current"]
+        raise RuntimeError(f"Tibber-API meldet: {payload['errors']}")
+    try:
+        data = payload["data"]["viewer"]["homes"][0]["currentSubscription"]
+        return data["priceInfo"], data["current"]
+    except (KeyError, IndexError) as e:
+        raise RuntimeError(f"Unerwartete Antwort-Struktur: {e}") from e
 
 # ------------------------------
 # 2. WETTER: Open-Meteo
