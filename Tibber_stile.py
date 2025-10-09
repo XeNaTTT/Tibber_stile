@@ -46,10 +46,10 @@ def get_tibber_data():
               tomorrow { total startsAt }
               current { total startsAt }
             }
-            current {
-              power
-              powerProduction
-            }
+          }
+          current {
+            power
+            powerProduction
           }
         }
       }
@@ -59,21 +59,22 @@ def get_tibber_data():
         "Authorization": f"Bearer {api_key.API_KEY}",
         "Content-Type": "application/json"
     }
-    print("DEBUG – Header:", headers)          # ?
     res = requests.post(
         "https://api.tibber.com/v1-beta/gql",
         json={"query": query},
         headers=headers,
         timeout=15
     )
-    print("DEBUG – Status:", res.status_code)  # ?
-    print("DEBUG – Raw:", res.text)            # ?
+    print("Status:", res.status_code)
     res.raise_for_status()
     payload = res.json()
     if "errors" in payload:
         raise RuntimeError(payload["errors"])
-    data = payload["data"]["viewer"]["homes"][0]["currentSubscription"]
-    return data["priceInfo"], data["current"]
+
+    home = payload["data"]["viewer"]["homes"][0]
+    price_info = home["currentSubscription"]["priceInfo"]
+    current_power = home["current"]
+    return price_info, current_power
     
 # ------------------------------
 # 3. ECOFLOW: Batterie-Status
