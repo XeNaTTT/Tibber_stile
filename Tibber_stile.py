@@ -193,7 +193,8 @@ def sunshine_hours(lat, lon, model=None):
         j = r.json()
         with open("/home/alex/E-Paper-tibber-Preisanzeige/openmeteo_last.json", "w") as f:
             json.dump(j, f, indent=2)
-            sec = (j.get("daily", {}).get("sunshine_duration") or [0])[0]
+
+        sec = (j.get("daily", {}).get("sunshine_duration") or [0])[0]
         # falls versehentlich mehrere Modelle im JSON: nimm ersten numerischen Wert
         if isinstance(sec, (list, tuple)):
             sec = sec[0] if sec else 0
@@ -206,6 +207,7 @@ def sunshine_hours(lat, lon, model=None):
     except Exception as e:
         logging.error("Sunshine fetch failed: %s", e)
         return None
+
 
 # ---------- EcoFlow ----------
 def ecoflow_status():
@@ -255,7 +257,7 @@ def draw_weather_box(d, x, y, w, h, fonts, sun_hours):
         d.line((cx+math.cos(rad)*r*1.6, cy+math.sin(rad)*r*1.6,
                 cx+math.cos(rad)*r*2.4, cy+math.sin(rad)*r*2.4), fill=0, width=2)
     d.text((x+60, y+5), "Wetter", font=fonts['bold'], fill=0)
-    val = f"{sun_hours:.1f} h" if sun_hours is not None else "â€”"
+    val = f"{sun_hours:.1f} h" if sun_hours is not None else "0"
     d.text((x+60, y+28), "Sonnenstunden heute: "+val, font=fonts['small'], fill=0)
 
 def minutes_to_hhmm(m):
