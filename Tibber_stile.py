@@ -248,24 +248,45 @@ def draw_dashed_line(d, x1, y1, x2, y2, dash=2, gap=2, fill=0, width=1):
         xb, yb = x1 + dx*re, y1 + dy*re
         d.line((xa, ya, xb, yb), fill=fill, width=width)
 
+# ---------- Helper ----------
+def _as_float_or_none(x):
+    """Sichere Konvertierung beliebiger Werte zu float oder None."""
+    if isinstance(x, (list, tuple)):
+        x = x[0] if x else None
+    try:
+        return None if x is None else float(x)
+    except Exception:
+        return None
+
+
 def draw_weather_box(d, x, y, w, h, fonts, sun_hours):
+    # Rahmen
     d.rectangle((x, y, x+w, y+h), outline=0, width=2)
+
+    # Sonnen-Icon
     cx, cy, r = x+25, y+25, 10
     d.ellipse((cx-r, cy-r, cx+r, cy+r), outline=0, width=2)
     for ang in range(0, 360, 45):
         rad = math.radians(ang)
         d.line((cx+math.cos(rad)*r*1.6, cy+math.sin(rad)*r*1.6,
                 cx+math.cos(rad)*r*2.4, cy+math.sin(rad)*r*2.4), fill=0, width=2)
+
+    # Titel
     d.text((x+60, y+5), "Wetter", font=fonts['bold'], fill=0)
-    val = f"{sun_hours:.1f} h" if sun_hours is not None else "0"
-    d.text((x+60, y+28), "Sonnenstunden heute: "+val, font=fonts['small'], fill=0)
+
+    # Wert robust formatieren (auch wenn tuple/list/string kommt)
+    sun_val = _as_float_or_none(sun_hours)
+    txt = "Sonnenstunden heute: "
+    val = f"{sun_val:.1f} h" if sun_val is not None else "0 h"
+    d.text((x+60, y+28), txt + val, font=fonts['small'], fill=0)
+
 
 def minutes_to_hhmm(m):
-    if m is None: return "â€”"
+    if m is None: return "Ã¢â‚¬â€"
     try:
         m = int(m)
         return f"{m//60:02d}:{m%60:02d} h"
-    except: return "â€”"
+    except: return "Ã¢â‚¬â€"
 
 
 def draw_battery(d, x, y, w, h, soc, arrow=None, fonts=None):
@@ -295,8 +316,8 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     batt_x, batt_y = x+10, y+28
     draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=arrow, fonts=fonts)
     lines = [
-        f"Leistung: {int(p)} W" if isinstance(p,(int,float)) else "Leistung: â€”",
-        f"Modus: {st.get('mode') or 'â€”'}",
+        f"Leistung: {int(p)} W" if isinstance(p,(int,float)) else "Leistung: Ã¢â‚¬â€",
+        f"Modus: {st.get('mode') or 'Ã¢â‚¬â€'}",
         f"Restzeit: {minutes_to_hhmm(st.get('eta_min'))}"
     ]
     for i, t in enumerate(lines):
@@ -401,24 +422,36 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     hour_ticks(tr, X0+PW)
 
     # Legende Leistung
-    d.text((X1-180, Y0-16), "â€” â€” PV   â€”â€”  Verbrauch", font=fonts['tiny'], fill=0)
+    d.text((X1-180, Y0-16), "Ã¢â‚¬â€ Ã¢â‚¬â€ PV   Ã¢â‚¬â€Ã¢â‚¬â€  Verbrauch", font=fonts['tiny'], fill=0)
 
-    # Minutengenauer Marker
+        # Minutengenauer Marker (zwischen den 15-Min-StÃ¼tzstellen)
     if cur_dt and cur_price is not None:
-        def in_range(tlist, t):
-            return len(tlist)>1 and (tlist[0] <= t <= tlist[-1])
-        use_left = in_range(tl, cur_dt)
-        arr = tl if use_left else tr
-        x0  = X0 if use_left else X0+PW
-        if len(arr) > 1:
-            t0, t1 = arr[0], arr[-1]
-            span = (t1 - t0).total_seconds()
-            frac = max(0.0, min(1.0, (cur_dt - t0).total_seconds() / (span or 1)))
-            px = x0 + frac * PW
+        def pick_panel():
+            if len(tl)>1 and tl[0] <= cur_dt <= tl[-1]:
+                return tl, X0
+            if len(tr)>1 and tr[0] <= cur_dt <= tr[-1]:
+                return tr, X0+PW
+            # Fallback: aktuelles Panel rechts
+            return tr, X0+PW
+
+        arr, x0 = pick_panel()
+        n = len(arr)
+        if n > 1:
+            t0 = arr[0]
+            # Sekunden seit Panel-Start
+            delta = (cur_dt - t0).total_seconds()
+            # Index innerhalb 15-Min-Raster als Gleitkommazahl
+            i_float = delta / 900.0  # 900s = 15 Minuten
+            i_float = max(0.0, min(n-1, i_float))
+            slot_w = PW / (n-1)
+            px = x0 + i_float * slot_w
+
+            # y nach aktuellem Preis
             py = Y1 - (cur_price - vmin) * sy_price
             r  = 4
             d.ellipse((px-r, py-r, px+r, py+r), fill=0)
             d.text((px+r+2, py-r-2), f"{cur_price/100:.2f}", font=fonts['tiny'], fill=0)
+
 
 # ---------- Main ----------
 def main():
