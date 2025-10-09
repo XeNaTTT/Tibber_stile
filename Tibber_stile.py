@@ -279,13 +279,16 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     W,H = X1-X0, Y1-Y0
     PW  = W/2
 
-    tl, vl = expand_to_15min(left)
-    tr, vr = expand_to_15min(right)
-    if not (vl or vr): return
+    # *** HIER: Immer auf 15-Minuten expandieren ***
+    tl, vl = expand_to_15min(left)   # 96 Punkte
+    tr, vr = expand_to_15min(right)  # 96 Punkte
+    if not (vl or vr): 
+        return
 
     allp = vl + vr
     vmin, vmax = min(allp)-0.5, max(allp)+0.5
     sy_price = H/(vmax - vmin if vmax>vmin else 1)
+
 
     def vmax_power(series):
         if series is None: return 0
