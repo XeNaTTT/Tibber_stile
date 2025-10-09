@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import sys, os, time, math, json, requests, datetime as dt, sqlite3, logging
+import sys, os, math, json, requests, datetime as dt, sqlite3, logging
 from PIL import Image, ImageDraw, ImageFont
 import pandas as pd, numpy as np
 
@@ -12,7 +12,7 @@ except ImportError:
     from backports.zoneinfo import ZoneInfo
 LOCAL_TZ = ZoneInfo("Europe/Berlin")
 
-# E-Paper
+# E-Paper Lib
 sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib')
 sys.path.append('/home/alex/E-Paper-tibber-Preisanzeige/e-paper/lib/waveshare_epd')
 from waveshare_epd import epd7in5_V2
@@ -68,18 +68,22 @@ def cached_yesterday():
     return load_cache(CACHE_YESTERDAY) or {"data": []}
 
 def prepare_info(pi):
-    today_vals = [s['total']*100 for s in pi['today']]
+    today = pi['today']
+    today_vals = [s['total']*100 for s in today]
     cur = pi['current']
+    low_idx = int(np.argmin(today_vals)) if today_vals else None
+    low_time = (dt.datetime.fromisoformat(today[low_idx]['startsAt']).astimezone(LOCAL_TZ)
+                if low_idx is not None else None)
     return {
         'current_dt': dt.datetime.fromisoformat(cur['startsAt']).astimezone(LOCAL_TZ),
         'current_price': cur['total']*100,
         'lowest_today': min(today_vals) if today_vals else 0,
+        'lowest_today_time': low_time,
         'highest_today': max(today_vals) if today_vals else 0
     }
 
 # ---------- 15-Min Transformation ----------
 def expand_to_15min(slots):
-    """Erzeugt 15-Minuten-Raster (4 Punkte je Stunde, Step-Hold)."""
     ts_list, val_list = [], []
     for s in slots:
         start = dt.datetime.fromisoformat(s['startsAt']).astimezone(LOCAL_TZ)
@@ -89,7 +93,7 @@ def expand_to_15min(slots):
             val_list.append(price)
     return ts_list, val_list
 
-# ---------- PV & Verbrauch ----------
+# ---------- DB-Serien ----------
 def series_from_db(table, column, slots_dt):
     conn = sqlite3.connect(DB_FILE)
     try:
@@ -99,7 +103,6 @@ def series_from_db(table, column, slots_dt):
     conn.close()
     df['ts'] = pd.to_datetime(df['ts'], unit='s', utc=True).dt.tz_convert(LOCAL_TZ)
     df.set_index('ts', inplace=True)
-    # auf 15 Minuten glätten
     df = df.resample('15T').mean().ffill().fillna(0)
     out = []
     for t in slots_dt:
@@ -111,10 +114,9 @@ def get_pv_series(slots_dt):
     return series_from_db("pv_log", "dtu_power", slots_dt)
 
 def get_consumption_series(slots_dt):
-    # optional: consumption_log(ts, consumption_w)
     return series_from_db("consumption_log", "consumption_w", slots_dt)
 
-# ---------- Wetter (Open-Meteo, keine API-Keys noetig) ----------
+# ---------- Wetter ----------
 def sunshine_hours(lat, lon):
     try:
         url = ("https://api.open-meteo.com/v1/forecast"
@@ -127,21 +129,17 @@ def sunshine_hours(lat, lon):
     except Exception:
         return None
 
-# ---------- EcoFlow (Fallback auf JSON) ----------
+# ---------- EcoFlow ----------
 def ecoflow_status():
-    # Prioritaet: Open API, sonst Fallback JSON
     try:
         token = getattr(api_key, "ECOFLOW_TOKEN", None)
         device_id = getattr(api_key, "ECOFLOW_DEVICE_ID", None)
         if token and device_id:
-            # Beispiel-Endpunkt – ggf. an deine Open-API Route anpassen:
-            # https://api.ecoflow.com/iot-open/device/queryDeviceQuota
             url = "https://api.ecoflow.com/iot-open/device/queryDeviceQuota"
             hdr = {"Authorization": token, "Content-Type":"application/json"}
             r = requests.post(url, headers=hdr, json={"deviceSn": device_id}, timeout=10)
             r.raise_for_status()
             j = r.json()
-            # Mapping anpassen je nach Antwortstruktur:
             soc = safe_get(j, "data", "soc", default=None)
             pow_w = safe_get(j, "data", "power", default=None)
             mode = safe_get(j, "data", "workMode", default=None)
@@ -149,7 +147,6 @@ def ecoflow_status():
             return dict(soc=soc, power_w=pow_w, mode=mode, eta_min=eta)
     except Exception:
         pass
-    # Fallback JSON
     if os.path.exists(ECOFLOW_FALLBACK):
         try:
             with open(ECOFLOW_FALLBACK) as f:
@@ -158,7 +155,7 @@ def ecoflow_status():
             pass
     return {"soc": None, "power_w": None, "mode": None, "eta_min": None}
 
-# ---------- Drawing Helpers ----------
+# ---------- Drawing ----------
 def draw_dashed_line(d, x1, y1, x2, y2, dash=2, gap=2, fill=0, width=1):
     dx, dy = x2-x1, y2-y1
     dist = math.hypot(dx, dy)
@@ -172,20 +169,16 @@ def draw_dashed_line(d, x1, y1, x2, y2, dash=2, gap=2, fill=0, width=1):
         d.line((xa, ya, xb, yb), fill=fill, width=width)
 
 def draw_weather_box(d, x, y, w, h, fonts, sun_hours):
-    # Rahmen
     d.rectangle((x, y, x+w, y+h), outline=0, width=2)
-    # Sonnen-Icon
     cx, cy, r = x+25, y+25, 10
     d.ellipse((cx-r, cy-r, cx+r, cy+r), outline=0, width=2)
     for ang in range(0, 360, 45):
         rad = math.radians(ang)
         d.line((cx+math.cos(rad)*r*1.6, cy+math.sin(rad)*r*1.6,
                 cx+math.cos(rad)*r*2.4, cy+math.sin(rad)*r*2.4), fill=0, width=2)
-    title = "Wetter"
-    d.text((x+60, y+5), title, font=fonts['bold'], fill=0)
-    txt = "Sonnenstunden heute: "
+    d.text((x+60, y+5), "Wetter", font=fonts['bold'], fill=0)
     val = f"{sun_hours:.1f} h" if sun_hours is not None else "—"
-    d.text((x+60, y+28), txt+val, font=fonts['small'], fill=0)
+    d.text((x+60, y+28), "Sonnenstunden heute: "+val, font=fonts['small'], fill=0)
 
 def minutes_to_hhmm(m):
     if m is None: return "—"
@@ -194,28 +187,56 @@ def minutes_to_hhmm(m):
         return f"{m//60:02d}:{m%60:02d} h"
     except: return "—"
 
+
+def draw_battery(d, x, y, w, h, soc, arrow=None, fonts=None):
+    soc = max(0, min(100, int(soc) if soc is not None else 0))
+    d.rectangle((x, y, x+w, y+h), outline=0, width=2)
+    d.rectangle((x+w, y+h*0.35, x+w+6, y+h*0.65), outline=0, width=2)
+    inner_w = max(0, int((w-6) * soc/100))
+    d.rectangle((x+3, y+3, x+3+inner_w, y+h-3), fill=0)
+    if fonts: d.text((x+w+12, y+h/2-7), f"{soc}%", font=fonts['small'], fill=0)
+    if arrow == "up":
+        d.polygon([(x+w+45,y+h*0.65),(x+w+55,y+h*0.65),(x+w+50,y+h*0.40)], fill=0)
+    elif arrow == "down":
+        d.polygon([(x+w+45,y+h*0.40),(x+w+55,y+h*0.40),(x+w+50,y+h*0.65)], fill=0)
+
+
 def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     d.rectangle((x, y, x+w, y+h), outline=0, width=2)
     d.text((x+10, y+5), "EcoFlow Stream AC", font=fonts['bold'], fill=0)
+    arrow=None
+    mode = (st.get('mode') or "").lower()
+    p = st.get('power_w')
+    if "charg" in mode: arrow="up"
+    elif "discharg" in mode or "feed" in mode: arrow="down"
+    elif isinstance(p,(int,float)):
+        if p < -10: arrow="up"
+        elif p > 10: arrow="down"
+    batt_x, batt_y = x+10, y+28
+    draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=arrow, fonts=fonts)
     lines = [
-        f"SoC: {st['soc']}%" if st.get('soc') is not None else "SoC: —",
-        f"Leistung: {int(st['power_w'])} W" if st.get('power_w') is not None else "Leistung: —",
+        f"Leistung: {int(p)} W" if isinstance(p,(int,float)) else "Leistung: —",
         f"Modus: {st.get('mode') or '—'}",
         f"Restzeit: {minutes_to_hhmm(st.get('eta_min'))}"
     ]
     for i, t in enumerate(lines):
-        d.text((x+10, y+28 + i*18), t, font=fonts['small'], fill=0)
+        d.text((batt_x+120, batt_y - 4 + i*16), t, font=fonts['small'], fill=0)
+
 
 def draw_info_box(d, info, fonts, y, width):
     x0 = 10
+    low_time = info.get('lowest_today_time')
+    low_lbl = (f"{info['lowest_today']/100:.2f} ct @ {low_time.strftime('%H:%M')}"
+               if low_time else f"{info['lowest_today']/100:.2f} ct")
     items = [
-        ("Preis jetzt", info['current_price']/100),
-        ("Tief heute", info['lowest_today']/100),
-        ("Hoch heute", info['highest_today']/100),
+        ("Preis jetzt", f"{info['current_price']/100:.2f} ct"),
+        ("Tief heute",  low_lbl),
+        ("Hoch heute",  f"{info['highest_today']/100:.2f} ct"),
     ]
     colw = width/len(items)
     for i,(k,v) in enumerate(items):
-        d.text((x0 + i*colw, y), f"{k}: {v:.2f} ct", font=fonts['bold'], fill=0)
+        d.text((x0 + i*colw, y), f"{k}: {v}", font=fonts['bold'], fill=0)
+
 
 def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                        pv_left=None, pv_right=None,
@@ -225,7 +246,6 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     W,H = X1-X0, Y1-Y0
     PW  = W/2
 
-    # 15-Min Arrays
     tl, vl = expand_to_15min(left)
     tr, vr = expand_to_15min(right)
     if not (vl or vr): return
@@ -234,7 +254,6 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     vmin, vmax = min(allp)-0.5, max(allp)+0.5
     sy_price = H/(vmax - vmin if vmax>vmin else 1)
 
-    # zweite Achse fuer Leistung (PV/Verbrauch)
     def vmax_power(series):
         if series is None: return 0
         try: return float(np.nanmax(series)) if len(series)>0 else 0
@@ -243,12 +262,11 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                vmax_power(cons_left), vmax_power(cons_right))
     sy_pow = H/((pmax or 1)*1.2)
 
-    # Y-Ticks (Preis)
+    # Preis-Y Ticks
     step = 5
     yv = math.floor(vmin/step)*step
     while yv <= vmax:
         yy = Y1 - (yv - vmin)*sy_price
-        d.line((X0-4,yy, X1+4,yy), fill=255)  # helle Hilfslinie (loeschen)
         d.line((X0,yy, X1,yy), fill=0, width=1)
         d.text((X0-45, yy-7), f"{yv/100:.2f}", font=fonts['tiny'], fill=0)
         yv += step
@@ -258,57 +276,60 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
         n = len(ts_list)
         if n < 2: return
         xs = [x0 + i*(PW/(n-1)) for i in range(n)]
-
-        # Preis als Stufenlinie
+        # Preis Stufenlinie
         for i in range(n-1):
             x1, y1 = xs[i],   Y1 - (val_list[i]   - vmin)*sy_price
             x2, y2 = xs[i+1], Y1 - (val_list[i+1] - vmin)*sy_price
             d.line((x1,y1, x2,y1), fill=0, width=2)
             d.line((x2,y1, x2,y2), fill=0, width=2)
-
-        # PV (kurzer Dash)
+        # PV
         if pv_list is not None and n == len(pv_list):
             for i in range(n-1):
                 y1 = Y1 - pv_list.iloc[i]*sy_pow
                 y2 = Y1 - pv_list.iloc[i+1]*sy_pow
                 draw_dashed_line(d, xs[i], y1, xs[i+1], y2, dash=2, gap=2, width=1)
-
-        # Verbrauch (laengerer Dash => visuell unterscheidbar)
+        # Verbrauch
         if cons_list is not None and n == len(cons_list):
             for i in range(n-1):
                 y1 = Y1 - cons_list.iloc[i]*sy_pow
                 y2 = Y1 - cons_list.iloc[i+1]*sy_pow
                 draw_dashed_line(d, xs[i], y1, xs[i+1], y2, dash=4, gap=3, width=1)
-
-        # Labels min/max Preis
+        # Min/Max Labels
         vmin_i, vmax_i = val_list.index(min(val_list)), val_list.index(max(val_list))
         for idx in (vmin_i, vmax_i):
             xi, yi = xs[idx], Y1 - (val_list[idx]-vmin)*sy_price
             d.text((xi-12, yi-12), f"{val_list[idx]/100:.2f}", font=fonts['tiny'], fill=0)
 
-    # Panels
     panel(tl, vl, pv_left,  cons_left,  X0)
     d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
     panel(tr, vr, pv_right, cons_right, X0+PW)
 
-    # Subtitles
-    d.text((X0+5,    Y1+5), subtitles[0], font=fonts['bold'], fill=0)
-    d.text((X0+PW+5, Y1+5), subtitles[1], font=fonts['bold'], fill=0)
+    # Subtitles unter Achse
+    d.text((X0+5,    Y1+18), subtitles[0], font=fonts['bold'], fill=0)
+    d.text((X0+PW+5, Y1+18), subtitles[1], font=fonts['bold'], fill=0)
+
+    # Stundenbeschriftung
+    def hour_ticks(ts_list, x0):
+        if len(ts_list) < 2: return
+        n = len(ts_list)
+        xs = [x0 + i*(PW/(n-1)) for i in range(n)]
+        for i,t in enumerate(ts_list):
+            if t.minute == 0:
+                d.line((xs[i], Y1, xs[i], Y1+4), fill=0, width=1)
+                d.text((xs[i]-8, Y1+6), t.strftime("%H"), font=fonts['tiny'], fill=0)
+    hour_ticks(tl, X0)
+    hour_ticks(tr, X0+PW)
 
     # Legende Leistung
     d.text((X1-180, Y0-16), "— — PV   ——  Verbrauch", font=fonts['tiny'], fill=0)
 
-       # Marker fuer aktuelle Zeit (minutengenau)
+    # Minutengenauer Marker
     if cur_dt and cur_price is not None:
-        # bestimme Panel anhand Zeitbereich
         def in_range(tlist, t):
             return len(tlist)>1 and (tlist[0] <= t <= tlist[-1])
-        left_times  = tl
-        right_times = tr
-        use_left = in_range(left_times, cur_dt)
-        arr = left_times if use_left else right_times
+        use_left = in_range(tl, cur_dt)
+        arr = tl if use_left else tr
         x0  = X0 if use_left else X0+PW
-
         if len(arr) > 1:
             t0, t1 = arr[0], arr[-1]
             span = (t1 - t0).total_seconds()
@@ -319,16 +340,13 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
             d.ellipse((px-r, py-r, px+r, py+r), fill=0)
             d.text((px+r+2, py-r-2), f"{cur_price/100:.2f}", font=fonts['tiny'], fill=0)
 
-            except StopIteration:
-                pass
-
 # ---------- Main ----------
 def main():
     epd = epd7in5_V2.EPD()
     epd.init(); epd.Clear()
     w, h = epd.width, epd.height
 
-    # Daten laden
+    # Daten
     pi   = tibber_priceinfo()
     update_price_cache(pi)
     info = prepare_info(pi)
@@ -341,7 +359,6 @@ def main():
         left, right = cached_yesterday()['data'], pi['today']
         labels = ("Gestern", "Heute")
 
-    # 15-Min Timestamps fuer beide Panels
     tl_dt, _ = expand_to_15min(left)
     tr_dt, _ = expand_to_15min(right)
 
@@ -350,8 +367,7 @@ def main():
     cons_left = get_consumption_series(tl_dt)
     cons_right= get_consumption_series(tr_dt)
 
-    sun_h = sunshine_hours(getattr(api_key, "LAT", 52.52),
-                          getattr(api_key, "LON", 13.405))
+    sun_h = sunshine_hours(getattr(api_key, "LAT", 52.428), getattr(api_key, "LON", 13.351))
     eco   = ecoflow_status()
 
     # Canvas
@@ -364,24 +380,22 @@ def main():
         f_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
         f_tiny  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
     except Exception:
-        f_bold  = ImageFont.load_default()
-        f_small = ImageFont.load_default()
-        f_tiny  = ImageFont.load_default()
+        f_bold = f_small = f_tiny = ImageFont.load_default()
     fonts = {'bold': f_bold, 'small': f_small, 'tiny': f_tiny}
 
-    # Top-Leiste: zwei Boxen
+    # Layout
     margin = 10
     top_h  = 70
     box_w  = (w - margin*3)//2
     draw_weather_box(d, margin, margin, box_w, top_h, fonts, sun_h)
     draw_ecoflow_box(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
 
-    # Info-Zeile
-    draw_info_box(d, info, fonts, y=top_h + margin + 10, width=w-20)
+    # Info-Zeile tiefer
+    draw_info_box(d, info, fonts, y=top_h + margin + 18, width=w-20)
 
-    # Chartbereich
-    chart_top = top_h + margin + 30
-    chart_area = (int(w*0.06), chart_top, w - int(w*0.06), h-30)
+    # Chart kleiner in der Hoehe + Platz fuer Stunden
+    chart_top = top_h + margin + 40
+    chart_area = (int(w*0.06), chart_top, w - int(w*0.06), h-70)
 
     draw_two_day_chart(
         d, left, right, fonts, labels, chart_area,
@@ -390,7 +404,6 @@ def main():
         cur_dt=info['current_dt'], cur_price=info['current_price']
     )
 
-    # Footer
     footer = dt.datetime.now(LOCAL_TZ).strftime("Update: %H:%M %d.%m.%Y")
     d.text((10, h-20), footer, font=fonts['tiny'], fill=0)
 
