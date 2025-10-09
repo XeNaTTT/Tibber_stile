@@ -56,26 +56,23 @@ def get_tibber_data():
     }
     """
     headers = {
-        "Authorization": f"Bearer {api_key.API_KEY}",   # ← Wichtig: "Bearer " voran!
+        "Authorization": f"Bearer {api_key.API_KEY}",
         "Content-Type": "application/json"
     }
     res = requests.post(
-        "https://api.tibber.com/v1-beta/gql",          # ← kein Leerzeichen!
+        "https://api.tibber.com/v1-beta/gql",
         json={"query": query},
         headers=headers,
         timeout=15
     )
+    print("Status:", res.status_code)          # ← Debug
+    print("Antwort:", res.text)                # ← Debug
     res.raise_for_status()
     payload = res.json()
-
     if "errors" in payload:
-        raise RuntimeError(f"Tibber-API meldet: {payload['errors']}")
-    try:
-        data = payload["data"]["viewer"]["homes"][0]["currentSubscription"]
-        return data["priceInfo"], data["current"]
-    except (KeyError, IndexError) as e:
-        raise RuntimeError(f"Unerwartete Antwort-Struktur: {e}") from e
-
+        raise RuntimeError(payload["errors"])
+    data = payload["data"]["viewer"]["homes"][0]["currentSubscription"]
+    return data["priceInfo"], data["current"]
 # ------------------------------
 # 2. WETTER: Open-Meteo
 # ------------------------------
