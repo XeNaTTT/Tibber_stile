@@ -193,8 +193,16 @@ def sunshine_hours(lat, lon, model=None):
         j = r.json()
         with open("/home/alex/E-Paper-tibber-Preisanzeige/openmeteo_last.json", "w") as f:
             json.dump(j, f, indent=2)
-        sec = (j.get("daily", {}).get("sunshine_duration") or [0])[0]
-        return round((sec or 0) / 3600, 1)
+                sec = (j.get("daily", {}).get("sunshine_duration") or [0])[0]
+        # falls versehentlich mehrere Modelle im JSON: nimm ersten numerischen Wert
+        if isinstance(sec, (list, tuple)):
+            sec = sec[0] if sec else 0
+        try:
+            hours = float(sec) / 3600.0
+        except Exception:
+            hours = 0.0
+        return round(hours, 1)
+
     except Exception as e:
         logging.error("Sunshine fetch failed: %s", e)
         return None
@@ -247,15 +255,15 @@ def draw_weather_box(d, x, y, w, h, fonts, sun_hours):
         d.line((cx+math.cos(rad)*r*1.6, cy+math.sin(rad)*r*1.6,
                 cx+math.cos(rad)*r*2.4, cy+math.sin(rad)*r*2.4), fill=0, width=2)
     d.text((x+60, y+5), "Wetter", font=fonts['bold'], fill=0)
-    val = f"{sun_hours:.1f} h" if sun_hours is not None else "—"
+    val = f"{sun_hours:.1f} h" if sun_hours is not None else "â€”"
     d.text((x+60, y+28), "Sonnenstunden heute: "+val, font=fonts['small'], fill=0)
 
 def minutes_to_hhmm(m):
-    if m is None: return "—"
+    if m is None: return "â€”"
     try:
         m = int(m)
         return f"{m//60:02d}:{m%60:02d} h"
-    except: return "—"
+    except: return "â€”"
 
 
 def draw_battery(d, x, y, w, h, soc, arrow=None, fonts=None):
@@ -285,8 +293,8 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     batt_x, batt_y = x+10, y+28
     draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=arrow, fonts=fonts)
     lines = [
-        f"Leistung: {int(p)} W" if isinstance(p,(int,float)) else "Leistung: —",
-        f"Modus: {st.get('mode') or '—'}",
+        f"Leistung: {int(p)} W" if isinstance(p,(int,float)) else "Leistung: â€”",
+        f"Modus: {st.get('mode') or 'â€”'}",
         f"Restzeit: {minutes_to_hhmm(st.get('eta_min'))}"
     ]
     for i, t in enumerate(lines):
@@ -391,7 +399,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     hour_ticks(tr, X0+PW)
 
     # Legende Leistung
-    d.text((X1-180, Y0-16), "— — PV   ——  Verbrauch", font=fonts['tiny'], fill=0)
+    d.text((X1-180, Y0-16), "â€” â€” PV   â€”â€”  Verbrauch", font=fonts['tiny'], fill=0)
 
     # Minutengenauer Marker
     if cur_dt and cur_price is not None:
@@ -440,9 +448,7 @@ def main():
     else:
         left, right = (load_cache(CACHE_YESTERDAY) or {"data": []})['data'], pi['today']
         labels = ("Gestern", "Heute")
-    else:
-        left, right = cached_yesterday()['data'], pi['today']
-        labels = ("Gestern", "Heute")
+
 
     tl_dt, _ = expand_to_15min(left)
     tr_dt, _ = expand_to_15min(right)
@@ -450,11 +456,11 @@ def main():
     pv_left   = get_pv_series(tl_dt)
     pv_right  = get_pv_series(tr_dt)
     # Tibber: stundenverbrauch laden und auf 15min hochrechnen
-hourly = tibber_hourly_consumption(last=48)
-cons_left  = upsample_hourly_to_quarter(tl_dt, hourly)
-cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
+    hourly = tibber_hourly_consumption(last=48)
+    cons_left  = upsample_hourly_to_quarter(tl_dt, hourly)
+    cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
-    sun_h = sunshine_hours(api_key.LAT, api_key.LON), getattr(api_key, "LON", 13.351))
+    sun_h = sunshine_hours(api_key.LAT, api_key.LON), getattr(api_key, "LON", 13.351)
     eco   = ecoflow_status()
 
     # Canvas
