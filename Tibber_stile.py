@@ -298,19 +298,27 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     # Legende Leistung
     d.text((X1-180, Y0-16), "— — PV   ——  Verbrauch", font=fonts['tiny'], fill=0)
 
-    # Marker fuer aktuelle Stunde
+       # Marker fuer aktuelle Zeit (minutengenau)
     if cur_dt and cur_price is not None:
-        arr = tl if subtitles[0] in ("Heute","Gestern") and cur_dt.date()==tl[0].date() else tr
-        x0  = X0 if arr is tl else X0+PW
-        if len(arr)>1:
-            # Index des 15-Min Slots
-            try:
-                idx = next(i for i,t in enumerate(arr) if t.hour==cur_dt.hour and t.minute//15==cur_dt.minute//15)
-                px = x0 + idx*(PW/(len(arr)-1))
-                py = Y1 - (cur_price - vmin)*sy_price
-                r = 4
-                d.ellipse((px-r, py-r, px+r, py+r), fill=0)
-                d.text((px+r+2, py-r-2), f"{cur_price/100:.2f}", font=fonts['tiny'], fill=0)
+        # bestimme Panel anhand Zeitbereich
+        def in_range(tlist, t):
+            return len(tlist)>1 and (tlist[0] <= t <= tlist[-1])
+        left_times  = tl
+        right_times = tr
+        use_left = in_range(left_times, cur_dt)
+        arr = left_times if use_left else right_times
+        x0  = X0 if use_left else X0+PW
+
+        if len(arr) > 1:
+            t0, t1 = arr[0], arr[-1]
+            span = (t1 - t0).total_seconds()
+            frac = max(0.0, min(1.0, (cur_dt - t0).total_seconds() / (span or 1)))
+            px = x0 + frac * PW
+            py = Y1 - (cur_price - vmin) * sy_price
+            r  = 4
+            d.ellipse((px-r, py-r, px+r, py+r), fill=0)
+            d.text((px+r+2, py-r-2), f"{cur_price/100:.2f}", font=fonts['tiny'], fill=0)
+
             except StopIteration:
                 pass
 
