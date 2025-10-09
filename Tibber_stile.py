@@ -174,16 +174,29 @@ def upsample_hourly_to_quarter(ts_15min, hourly_list):
     return pd.Series(out)
 
 # ---------- Wetter ----------
-def sunshine_hours(lat, lon):
+def sunshine_hours(lat, lon, model=None):
+    """
+    Modellierte Sonnenstunden (WMO). Optionales `model` (z. B. "ecmwf_ifs04" oder "icon_seamless").
+    Wenn nicht angegeben, wird api_key.SUN_MODEL bzw. "ecmwf_ifs04" verwendet.
+    """
     try:
-        url = ("https://api.open-meteo.com/v1/forecast"
-               f"?latitude={lat}&longitude={lon}"
-               "&daily=sunshine_duration&timezone=Europe%2FBerlin")
+        if model is None:
+            model = getattr(api_key, "SUN_MODEL", "ecmwf_ifs04")
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            "&daily=sunshine_duration&timezone=Europe%2FBerlin"
+            f"&models={model}"
+        )
         r = requests.get(url, timeout=10)
         r.raise_for_status()
-        sec = safe_get(r.json(), "daily", "sunshine_duration", default=[0])[0]
-        return round((sec or 0)/3600, 1)
-    except Exception:
+        j = r.json()
+        with open("/home/alex/E-Paper-tibber-Preisanzeige/openmeteo_last.json", "w") as f:
+            json.dump(j, f, indent=2)
+        sec = (j.get("daily", {}).get("sunshine_duration") or [0])[0]
+        return round((sec or 0) / 3600, 1)
+    except Exception as e:
+        logging.error("Sunshine fetch failed: %s", e)
         return None
 
 # ---------- EcoFlow ----------
@@ -441,7 +454,7 @@ hourly = tibber_hourly_consumption(last=48)
 cons_left  = upsample_hourly_to_quarter(tl_dt, hourly)
 cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
-    sun_h = sunshine_hours(getattr(api_key, "LAT", 52.428), getattr(api_key, "LON", 13.351))
+    sun_h = sunshine_hours(api_key.LAT, api_key.LON), getattr(api_key, "LON", 13.351))
     eco   = ecoflow_status()
 
     # Canvas
@@ -465,7 +478,7 @@ cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
     draw_ecoflow_box(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
 
     # Info-Zeile tiefer
-    draw_info_box(d, info, fonts, y=top_h + margin + 10, width=w-20)
+    draw_info_box(d, info, fonts, y=top_h + margin + 18, width=w-20)
 
     # Chart kleiner in der Hoehe + Platz fuer Stunden
     chart_top = top_h + margin + 40
