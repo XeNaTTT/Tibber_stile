@@ -44,18 +44,38 @@ def safe_get(d, *path, default=None):
 
 # ---------- Tibber ----------
 def tibber_priceinfo():
-    hdr = {"Authorization": f"Bearer {api_key.API_KEY}"}
-    gql = '''
-    { viewer { homes { currentSubscription { priceInfo {
-        today    { total startsAt }
-        tomorrow { total startsAt }
-        current  { total startsAt }
-    }}}}}
-    '''
-    r = requests.post('https://api.tibber.com/v1-beta/gql',
-                      json={"query": gql}, headers=hdr, timeout=15)
-    r.raise_for_status()
-    return r.json()['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
+    # Robust: Content-Type Header + bessere Fehlermeldung
+    if not getattr(api_key, "API_KEY", None) or api_key.API_KEY.startswith("DEIN_"):
+        raise RuntimeError("Tibber API_KEY fehlt/Platzhalter. Trage einen gueltigen Token in api_key.py ein.")
+    hdr = {
+        "Authorization": f"Bearer {api_key.API_KEY}",
+        "Content-Type": "application/json"
+    }
+    gql = (
+        "{ viewer { homes { currentSubscription { priceInfo { "
+        "today { total startsAt } "
+        "tomorrow { total startsAt } "
+        "current { total startsAt } "
+        "}}}}}"
+    )
+    try:
+        r = requests.post('https://api.tibber.com/v1-beta/gql',
+                          json={"query": gql}, headers=hdr, timeout=20)
+        if r.status_code >= 400:
+            logging.error("Tibber HTTP %s: %s", r.status_code, r.text[:300])
+            r.raise_for_status()
+        j = r.json()
+    except Exception as e:
+        raise RuntimeError(f"Tibber Request fehlgeschlagen: {e}")
+
+    # GraphQL-Fehler pruefen
+    if isinstance(j, dict) and j.get("errors"):
+        raise RuntimeError(f"Tibber GraphQL Fehler: {j['errors']}")
+
+    try:
+        return j['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
+    except Exception as e:
+        raise RuntimeError(f"Tibber Antwort unerwartet: {e}, payload keys: {list(j.keys())}")
 
 def update_price_cache(pi):
     today = dt.date.today().isoformat()
@@ -346,15 +366,30 @@ def main():
     epd.init(); epd.Clear()
     w, h = epd.width, epd.height
 
-    # Daten
-    pi   = tibber_priceinfo()
-    update_price_cache(pi)
+    # Daten laden, robust gegen API-Ausfall
+    try:
+        pi = tibber_priceinfo()
+        update_price_cache(pi)
+    except Exception as e:
+        logging.error("Nutze Cache wegen Fehler: %s", e)
+        # Fallback: Heute aus TODAY-Cache, sonst leer; Rechts Teil = heute, Links = gestern
+        today_cache = load_cache(CACHE_TODAY) or {"data": []}
+        yesterday_cache = load_cache(CACHE_YESTERDAY) or {"data": []}
+        pi = {
+            'today': today_cache.get('data', []),
+            'tomorrow': [],
+            'current': {'startsAt': dt.datetime.now(LOCAL_TZ).isoformat(), 'total': (today_cache.get('data',[{'total':0}])[0].get('total', 0) or 0)}
+        }
+
     info = prepare_info(pi)
 
     tomorrow = pi.get('tomorrow', [])
     if tomorrow:
         left, right = pi['today'], tomorrow
         labels = ("Heute", "Morgen")
+    else:
+        left, right = (load_cache(CACHE_YESTERDAY) or {"data": []})['data'], pi['today']
+        labels = ("Gestern", "Heute")
     else:
         left, right = cached_yesterday()['data'], pi['today']
         labels = ("Gestern", "Heute")
