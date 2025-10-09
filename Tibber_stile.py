@@ -363,15 +363,18 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                vmax_power(cons_left), vmax_power(cons_right))
     sy_pow = H/((pmax or 1)*1.2)
 
-    # Preis-Y Ticks
+    # Preis-Y Ticks (nur innerhalb des Chart-Bereichs)
     step = 5
-    yv = math.floor(vmin/step)*step
+    yv = math.floor(vmin/step) * step
     while yv <= vmax:
-        yy = Y1 - (yv - vmin)*sy_price
-        d.line((X0,yy, X1,yy), fill=0, width=1)
-        d.text((X0-45, yy-7), f"{yv/100:.2f}", font=fonts['tiny'], fill=0)
+        yy = Y1 - (yv - vmin) * sy_price
+        if Y0 < yy < Y1:  # strikt innerhalb, keine Linie auf dem Rahmen
+            d.line((X0, yy, X1, yy), fill=0, width=1)
+            d.text((X0-45, yy-7), f"{yv/100:.2f}", font=fonts['tiny'], fill=0)
         yv += step
-    d.text((X0-45, Y0-18), 'Preis (ct/kWh)', font=fonts['tiny'], fill=0)
+
+
+
 
     def panel(ts_list, val_list, pv_list, cons_list, x0):
         n = len(ts_list)
@@ -406,8 +409,8 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     panel(tr, vr, pv_right, cons_right, X0+PW)
 
     # Subtitles unter Achse
-    d.text((X0+5,    Y1+18), subtitles[0], font=fonts['bold'], fill=0)
-    d.text((X0+PW+5, Y1+18), subtitles[1], font=fonts['bold'], fill=0)
+    d.text((X0+5,    Y1+28), subtitles[0], font=fonts['bold'], fill=0)
+    d.text((X0+PW+5, Y1+28), subtitles[1], font=fonts['bold'], fill=0)
 
     # Stundenbeschriftung
     def hour_ticks(ts_list, x0):
@@ -424,33 +427,34 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     # Legende Leistung
     d.text((X1-180, Y0-16), "Ã¢â‚¬â€ Ã¢â‚¬â€ PV   Ã¢â‚¬â€Ã¢â‚¬â€  Verbrauch", font=fonts['tiny'], fill=0)
 
-        # Minutengenauer Marker (zwischen den 15-Min-StÃ¼tzstellen)
-    if cur_dt and cur_price is not None:
-        def pick_panel():
-            if len(tl)>1 and tl[0] <= cur_dt <= tl[-1]:
+            # Minutengenauer Marker: X anhand der aktuellen Zeit, Y anhand current_price
+    if cur_price is not None:
+        now = dt.datetime.now(LOCAL_TZ)
+
+        def pick_panel_for_now():
+            if len(tl) > 1 and tl[0] <= now <= tl[-1]:
                 return tl, X0
-            if len(tr)>1 and tr[0] <= cur_dt <= tr[-1]:
-                return tr, X0+PW
-            # Fallback: aktuelles Panel rechts
-            return tr, X0+PW
+            if len(tr) > 1 and tr[0] <= now <= tr[-1]:
+                return tr, X0 + PW
+            return None, None
 
-        arr, x0 = pick_panel()
-        n = len(arr)
-        if n > 1:
-            t0 = arr[0]
-            # Sekunden seit Panel-Start
-            delta = (cur_dt - t0).total_seconds()
-            # Index innerhalb 15-Min-Raster als Gleitkommazahl
-            i_float = delta / 900.0  # 900s = 15 Minuten
-            i_float = max(0.0, min(n-1, i_float))
-            slot_w = PW / (n-1)
-            px = x0 + i_float * slot_w
+        arr, x0 = pick_panel_for_now()
+        if arr is not None:
+            n = len(arr)
+            if n > 1:
+                # Position im 15-Minuten Raster als Gleitkommaindex
+                t0 = arr[0]
+                i_float = (now - t0).total_seconds() / 900.0  # 900s = 15 min
+                i_float = max(0.0, min(n - 1, i_float))
 
-            # y nach aktuellem Preis
-            py = Y1 - (cur_price - vmin) * sy_price
-            r  = 4
-            d.ellipse((px-r, py-r, px+r, py+r), fill=0)
-            d.text((px+r+2, py-r-2), f"{cur_price/100:.2f}", font=fonts['tiny'], fill=0)
+                slot_w = PW / (n - 1)
+                px = x0 + i_float * slot_w
+                py = Y1 - (cur_price - vmin) * sy_price
+
+                r = 4
+                d.ellipse((px - r, py - r, px + r, py + r), fill=0)
+                d.text((px + r + 2, py - r - 2), f"{cur_price/100:.2f}", font=fonts['tiny'], fill=0)
+
 
 
 # ---------- Main ----------
@@ -519,7 +523,7 @@ def main():
     draw_ecoflow_box(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
 
     # Info-Zeile tiefer
-    draw_info_box(d, info, fonts, y=top_h + margin + 18, width=w-20)
+    draw_info_box(d, info, fonts, y=top_h + margin + 6, width=w-20)
 
     # Chart kleiner in der Hoehe + Platz fuer Stunden
     chart_top = top_h + margin + 40
@@ -533,7 +537,7 @@ def main():
     )
 
     footer = dt.datetime.now(LOCAL_TZ).strftime("Update: %H:%M %d.%m.%Y")
-    d.text((10, h-20), footer, font=fonts['tiny'], fill=0)
+    d.text((10, h-10), footer, font=fonts['tiny'], fill=0)
 
     epd.display(epd.getbuffer(img))
     epd.sleep()
