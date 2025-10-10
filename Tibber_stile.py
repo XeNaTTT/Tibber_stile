@@ -174,14 +174,13 @@ def upsample_hourly_to_quarter(ts_15min, hourly_list):
     return pd.Series(out)
 
 # ---------- Wetter ----------
-def sunshine_hours(lat, lon, model=None):
+def sunshine_hours_both(lat, lon, model=None):
     """
-    Modellierte Sonnenstunden (WMO). Optionales `model` (z. B. "ecmwf_ifs04" oder "icon_seamless").
-    Wenn nicht angegeben, wird api_key.SUN_MODEL bzw. "ecmwf_ifs04" verwendet.
+    Liefert (heute_h, morgen_h) als floats (h).
+    Nutzt Open-Meteo sunshine_duration (Sekunden -> Stunden).
     """
     try:
-        if model is None:
-            model = getattr(api_key, "SUN_MODEL", "ecmwf_ifs04")
+        model = model or getattr(api_key, "SUN_MODEL", "icon_seamless")
         url = (
             "https://api.open-meteo.com/v1/forecast"
             f"?latitude={lat}&longitude={lon}"
@@ -191,22 +190,28 @@ def sunshine_hours(lat, lon, model=None):
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         j = r.json()
-        with open("/home/alex/E-Paper-tibber-Preisanzeige/openmeteo_last.json", "w") as f:
-            json.dump(j, f, indent=2)
-
-        sec = (j.get("daily", {}).get("sunshine_duration") or [0])[0]
-        # falls versehentlich mehrere Modelle im JSON: nimm ersten numerischen Wert
-        if isinstance(sec, (list, tuple)):
-            sec = sec[0] if sec else 0
+        # optional zum Nachvollziehen ablegen:
         try:
-            hours = float(sec) / 3600.0
+            with open("/home/alex/E-Paper-tibber-Preisanzeige/openmeteo_last.json", "w") as f:
+                json.dump(j, f, indent=2)
         except Exception:
-            hours = 0.0
-        return round(hours, 1)
+            pass
 
+        arr = (j.get("daily", {}).get("sunshine_duration")) or []
+        def _h(idx):
+            try:
+                sec = arr[idx]
+                if sec is None:
+                    return 0.0
+                return round(float(sec)/3600.0, 1)
+            except Exception:
+                return 0.0
+
+        return _h(0), _h(1)
     except Exception as e:
         logging.error("Sunshine fetch failed: %s", e)
-        return None
+        return 0.0, 0.0
+
 
 
 # ---------- EcoFlow ----------
@@ -259,11 +264,11 @@ def _as_float_or_none(x):
         return None
 
 
-def draw_weather_box(d, x, y, w, h, fonts, sun_hours):
+def draw_weather_box(d, x, y, w, h, fonts, sun_today, sun_tomorrow=None):
     # Rahmen
     d.rectangle((x, y, x+w, y+h), outline=0, width=2)
 
-    # Sonnen-Icon
+    # Sonnen-Icon (links)
     cx, cy, r = x+25, y+25, 10
     d.ellipse((cx-r, cy-r, cx+r, cy+r), outline=0, width=2)
     for ang in range(0, 360, 45):
@@ -274,11 +279,16 @@ def draw_weather_box(d, x, y, w, h, fonts, sun_hours):
     # Titel
     d.text((x+60, y+5), "Wetter", font=fonts['bold'], fill=0)
 
-    # Wert robust formatieren (auch wenn tuple/list/string kommt)
-    sun_val = _as_float_or_none(sun_hours)
-    txt = "Sonnenstunden heute: "
-    val = f"{sun_val:.1f} h" if sun_val is not None else "0 h"
-    d.text((x+60, y+28), txt + val, font=fonts['small'], fill=0)
+    # Zahlen robust formatieren
+    try:  t_val = float(sun_today)    if sun_today    is not None else 0.0
+    except: t_val = 0.0
+    try:  m_val = float(sun_tomorrow) if sun_tomorrow is not None else None
+    except: m_val = None
+
+    d.text((x+60, y+28), f"Sonnenstunden heute:  {t_val:.1f} h", font=fonts['small'], fill=0)
+    if m_val is not None:
+        d.text((x+60, y+46), f"Sonnenstunden morgen: {m_val:.1f} h", font=fonts['small'], fill=0)
+
 
 
 def minutes_to_hhmm(m):
@@ -499,7 +509,8 @@ def main():
     cons_left  = upsample_hourly_to_quarter(tl_dt, hourly)
     cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
-    sun_h = sunshine_hours(api_key.LAT, api_key.LON)
+    sun_today, sun_tomorrow = sunshine_hours_both(api_key.LAT, api_key.LON)
+
     eco   = ecoflow_status()
 
     # Canvas
@@ -519,7 +530,7 @@ def main():
     margin = 10
     top_h  = 70
     box_w  = (w - margin*3)//2
-    draw_weather_box(d, margin, margin, box_w, top_h, fonts, sun_h)
+    draw_weather_box(d, margin, margin, box_w, top_h, fonts, sun_today, sun_tomorrow)
     draw_ecoflow_box(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
 
     # Info-Zeile tiefer
