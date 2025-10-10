@@ -499,7 +499,7 @@ def main():
     cons_left  = upsample_hourly_to_quarter(tl_dt, hourly)
     cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
-    sun_h = sunshine_hours(api_key.LAT, api_key.LON), getattr(api_key, "LON", 13.351)
+    sun_h = sunshine_hours(api_key.LAT, api_key.LON)
     eco   = ecoflow_status()
 
     # Canvas
