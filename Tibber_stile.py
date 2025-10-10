@@ -499,7 +499,7 @@ def main():
     cons_left  = upsample_hourly_to_quarter(tl_dt, hourly)
     cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
-    sun_today, sun_tomorrow = sunshine_hours_both(api_key.LAT, api_key.LON)
+    sun_h = sunshine_hours(api_key.LAT, api_key.LON), getattr(api_key, "LON", 13.351)
     eco   = ecoflow_status()
 
     # Canvas
@@ -519,7 +519,7 @@ def main():
     margin = 10
     top_h  = 70
     box_w  = (w - margin*3)//2
-    draw_weather_box(d, margin, margin, box_w, top_h, fonts, sun_today, sun_tomorrow)
+    draw_weather_box(d, margin, margin, box_w, top_h, fonts, sun_h)
     draw_ecoflow_box(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
 
     # Info-Zeile tiefer
