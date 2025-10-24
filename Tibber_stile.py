@@ -527,12 +527,12 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
 
     # Nutzung der Originalkeys aus der EcoFlow-API
     lines_left = [
-        f"Leistung: {fmt_w(p)}",
-        f"PV-Ertrag: {fmt_w(st.get('powGetPvSum'))}"
+    f"Leistung: {fmt_w(st.get('gridConnectionPower'))}",
+    f"PV-Ertrag: {fmt_w(st.get('powGetPvSum'))}"
     ]
     lines_right = [
-        f"Netz: {fmt_w(st.get('powGetSysGrid'))}",
-        f"Last: {fmt_w(st.get('powGetSysLoad'))}"
+    f"Netz: {fmt_w(st.get('powGetSysGrid'))}",
+    f"Last: {fmt_w(st.get('powGetSysLoad'))}"
     ]
 
     for i, t in enumerate(lines_left):
