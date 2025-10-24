@@ -495,12 +495,10 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
         elif p > 10:
             arrow = "down"
 
-    # --- Überschrift ---
+    # Überschrift + Pfeil
     title_x, title_y = x + 10, y + 5
     d.text((title_x, title_y), title, font=fonts['bold'], fill=0)
-
-    # --- Pfeil leicht nach rechts versetzt ---
-    arrow_offset = 20  # nur Pfeil nach rechts verschieben
+    arrow_offset = 15
     if arrow == "up":
         d.polygon([
             (title_x + 150 + arrow_offset, title_y + 20),
@@ -514,19 +512,27 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
             (title_x + 155 + arrow_offset, title_y + 20)
         ], fill=0)
 
-    # --- Batterie unverändert ---
+    # Batterie
     batt_x, batt_y = x + 10, y + 28
     draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=None, fonts=fonts)
 
-    # --- Textinfos (alle 5px nach rechts) ---
+    # Hilfsfunktion
+    def fmt_w(v):
+        try:
+            return f"{int(round(float(v)))} W"
+        except:
+            return "-"
+
     text_offset = 10
+
+    # Nutzung der Originalkeys aus der EcoFlow-API
     lines_left = [
-        f"Leistung: {int(p)} W" if isinstance(p, (int, float)) else "Leistung: —",
-        f"PV-Ertrag: {int(st.get('pv_w') or 0)} W"
+        f"Leistung: {fmt_w(p)}",
+        f"PV-Ertrag: {fmt_w(st.get('powGetPvSum'))}"
     ]
     lines_right = [
-        f"Netz: {int(st.get('gridConnectionPower') or 0)} W",
-        f"Last: {int(st.get('powGetSysLoad') or 0)} W"
+        f"Netz: {fmt_w(st.get('powGetSysGrid'))}",
+        f"Last: {fmt_w(st.get('powGetSysLoad'))}"
     ]
 
     for i, t in enumerate(lines_left):
