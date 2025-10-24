@@ -471,46 +471,55 @@ def draw_battery(d, x, y, w, h, soc, arrow=None, fonts=None):
         d.polygon([(x+w+45,y+h*0.40),(x+w+55,y+h*0.40),(x+w+50,y+h*0.65)], fill=0)
 
 def draw_ecoflow_box(d, x, y, w, h, fonts, st):
-    d.rectangle((x, y, x+w, y+h), outline=0, width=2)
-    d.text((x+10, y+5), "EcoFlow Stream AC", font=fonts['bold'], fill=0)
-
-    # Pfeilrichtung aus power_w
-    arrow = None
+    d.rectangle((x, y, x + w, y + h), outline=0, width=2)
+    title = "EcoFlow Stream AC"
     p = st.get('power_w')
-    if isinstance(p, (int,float)):
-        if p < -10: arrow = "up"     # Laden
-        elif p > 10: arrow = "down"  # Entladen
+    arrow = None
+    mode = (st.get('mode') or "").lower()
+    if "charg" in mode:
+        arrow = "up"
+    elif "discharg" in mode or "feed" in mode:
+        arrow = "down"
+    elif isinstance(p, (int, float)):
+        if p < -10:
+            arrow = "up"     # Laden
+        elif p > 10:
+            arrow = "down"   # Entladen
 
-    # Batterie links
-    batt_x, batt_y = x+10, y+28
-    draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=arrow, fonts=fonts)
+    # --- Überschrift + Pfeil nebeneinander ---
+    title_x, title_y = x + 10, y + 5
+    d.text((title_x, title_y), title, font=fonts['bold'], fill=0)
+    if arrow == "up":
+        d.polygon([
+            (title_x + 150, title_y + 20),
+            (title_x + 160, title_y + 20),
+            (title_x + 155, title_y + 5)
+        ], fill=0)
+    elif arrow == "down":
+        d.polygon([
+            (title_x + 150, title_y + 5),
+            (title_x + 160, title_y + 5),
+            (title_x + 155, title_y + 20)
+        ], fill=0)
 
-    # Hilfsformatierer
-    def fmt_w(v):
-        return f"{int(round(v))} W" if isinstance(v, (int,float)) else "-"
+    # --- Batterie ---
+    batt_x, batt_y = x + 10, y + 28
+    draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=None, fonts=fonts)
 
-    # Spalte 1 (links)
-    left_col_x  = batt_x + 130
-    left_col_y  = batt_y - 4
-    line_h      = 18
+    # --- Textinfos in 2 Spalten ---
+    lines_left = [
+        f"Leistung: {int(p)} W" if isinstance(p, (int, float)) else "Leistung: —",
+        f"PV-Ertrag: {int(st.get('pv_w') or 0)} W"
+    ]
+    lines_right = [
+        f"Netz: {int(st.get('gridConnectionPower') or 0)} W",
+        f"Last: {int(st.get('powGetSysLoad') or 0)} W"
+    ]
 
-    d.text((left_col_x, left_col_y + 0*line_h),
-           f"SoC: {st.get('soc') or '-'}%", font=fonts['small'], fill=0)
-    d.text((left_col_x, left_col_y + 1*line_h),
-           f"Leistung: {fmt_w(p)}", font=fonts['small'], fill=0)
-    d.text((left_col_x, left_col_y + 2*line_h),
-           f"Modus: {st.get('mode') or '-'}", font=fonts['small'], fill=0)
-
-    # Spalte 2 (rechts)
-    right_col_x = left_col_x + 160
-    d.text((right_col_x, left_col_y + 0*line_h),
-           f"Netz: {fmt_w(st.get('grid_w'))}", font=fonts['small'], fill=0)
-    d.text((right_col_x, left_col_y + 1*line_h),
-           f"Last: {fmt_w(st.get('load_w'))}", font=fonts['small'], fill=0)
-    if st.get('pv_input_w_sum') is not None:
-        d.text((right_col_x, left_col_y + 2*line_h),
-               f"PV: {fmt_w(st.get('pv_input_w_sum'))}", font=fonts['small'], fill=0)
-
+    for i, t in enumerate(lines_left):
+        d.text((batt_x + 120, batt_y - 4 + i * 16), t, font=fonts['small'], fill=0)
+    for i, t in enumerate(lines_right):
+        d.text((batt_x + 260, batt_y - 4 + i * 16), t, font=fonts['small'], fill=0)
 
 
 def draw_info_box(d, info, fonts, y, width):
