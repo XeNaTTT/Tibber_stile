@@ -139,14 +139,22 @@ def series_from_db(table, column, slots_dt):
         out.append(float(0.0 if pd.isna(v) else v))
     return pd.Series(out)
 
-def get_pv_series(slots_dt):
-    """Holt PV-Leistung aus EcoFlow (powGetPvSum) und füllt konstant über den Tag."""
+def get_pv_series(slots_dt, eco=None):
+    """
+    Holt die aktuelle PV-Leistung aus EcoFlow (powGetPvSum) und zeichnet eine
+    konstante Linie über den gezeigten Zeitraum.
+    Nutzt, wenn vorhanden, das bereits ermittelte 'eco'-Dict aus main().
+    """
     try:
-        eco = ecoflow_status()  # aktueller EcoFlow-Call
-        pv_watt = float(eco.get("pv_w")) if "pv_w" in eco else float(eco.get("powGetPvSum", 0))
+        if eco is None:
+            eco = ecoflow_status_bkw()
+        # bevorzugter Key aus unserem Mapper:
+        pv_watt = eco.get("pv_input_w_sum")
+        if pv_watt is None:
+            # Fallback: manche Mapper/Antw. liefern 'pv_w'
+            pv_watt = eco.get("pv_w")
+        pv_watt = float(pv_watt or 0.0)
         logging.info(f"EcoFlow PV aktuell: {pv_watt} W")
-
-        # gleichmäßig verteilen – eine konstante Linie über den Zeitraum
         return pd.Series([pv_watt] * len(slots_dt))
     except Exception as e:
         logging.error(f"PV aus EcoFlow fehlgeschlagen: {e}")
@@ -684,8 +692,8 @@ def main():
     tl_dt, _ = expand_to_15min(left)
     tr_dt, _ = expand_to_15min(right)
 
-    pv_left   = get_pv_series(tl_dt)
-    pv_right  = get_pv_series(tr_dt)
+    pv_left  = get_pv_series(tl_dt, eco=eco)
+    pv_right = get_pv_series(tr_dt, eco=eco)
 
     hourly = tibber_hourly_consumption(last=48)
     cons_left  = upsample_hourly_to_quarter(tl_dt, hourly)
