@@ -297,63 +297,137 @@ def ecoflow_get_all_quota(sn):
 
 def ecoflow_status_bkw():
     """
-    Holt alle Quotas und mappt generisch auf dein Display.
+    Holt alle Quotas und mappt generisch auf das Display.
+    Schreibt zusätzlich die Rohdaten nach ecoflow_quota_last.json.
     """
     sn = getattr(api_key, "ECOFLOW_DEVICE_ID", "").strip()
     if not sn:
         raise RuntimeError("ECOFLOW_DEVICE_ID fehlt in api_key.py")
 
     try:
-        q = ecoflow_get_all_quota(sn)
+        q = ecoflow_get_all_quota(sn)  # dict mit flachen Keys
+        # Debug-Dump zum Nachsehen
+        try:
+            with open("/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_quota_last.json", "w") as f:
+                json.dump(q, f, indent=2)
+        except Exception:
+            pass
     except Exception as e:
         logging.error("EcoFlow quota/all fehlgeschlagen: %s", e)
-        # Fallback-Datei
         if os.path.exists(ECOFLOW_FALLBACK):
             try:
                 with open(ECOFLOW_FALLBACK) as f:
                     return json.load(f)
             except Exception:
                 pass
-        return {"soc": None, "power_w": None, "mode": None, "eta_min": None,
-                "pv_input_w_sum": None, "pv1_input_w": None, "pv2_input_w": None}
+        return {
+            "soc": None, "power_w": None, "mode": None, "eta_min": None,
+            "pv_input_w_sum": None, "pv1_input_w": None, "pv2_input_w": None
+        }
 
+    # kleine Helfer für flexible Suche
     def g(*keys, default=None):
         for k in keys:
             if k in q and q[k] is not None:
-                v = q[k]
-                # Zahl als float, sonst String
-                try:
-                    if isinstance(v, str) and v.replace(".","",1).isdigit():
-                        return float(v)
-                    return float(v) if isinstance(v, (int,float)) else v
-                except Exception:
-                    return v
+                fv = _to_float(q[k])
+                return fv if fv is not None else q[k]
         return default
 
-    soc = g("bmsMaster.soc", "bmsPack.soc", "bms.soc", default=None)
+    def first_by_suffix(suffix, prefer_numeric=True):
+        for k, v in q.items():
+            if k.endswith(suffix):
+                if prefer_numeric:
+                    fv = _to_float(v)
+                    if fv is not None:
+                        return fv
+                else:
+                    return v
+        return None
 
-    in_w  = g("bmsMaster.inputWatts", "pv.inputWatts", "mppt.inputWatts", default=0.0)
-    out_w = g("bmsMaster.outputWatts", "pd.outputWatts", "ac.outputWatts", default=0.0)
-    power_w = (out_w or 0.0) - (in_w or 0.0)
+    def sum_by_contains(substr):
+        s = 0.0; found = False
+        for k, v in q.items():
+            if substr in k:
+                fv = _to_float(v)
+                if fv is not None:
+                    s += fv; found = True
+        return s if found else None
 
-    eta_s = g("pd.remainTime", "remainSec", default=None)
-    eta_m = g("remainMinutes", default=None)
-    if eta_m is None and eta_s is not None:
-        try: eta_m = int(float(eta_s)/60.0)
-        except: eta_m = None
+    # --- SoC ---
+    soc = g("bmsMaster.soc", "bmsPack.soc", "bms.soc", "soc")
+    if soc is None:
+        # Fallback: nimm erstes Feld, das auf .soc endet (z. B. bms0.soc)
+        soc = first_by_suffix(".soc")
+    if soc is not None:
+        try: soc = int(round(float(soc)))
+        except: pass
 
-    pv_sum = g("pv.inputWatts", "mppt.inputWatts", "pv.allWatts", default=None)
-    mode   = g("workMode", "inv.cfgAcEnabled", default=None)
+    # --- Leistung ---
+    # Kandidaten für Eingangs-/Ausgangsleistung
+    in_candidates  = [
+        "bmsMaster.inputWatts", "pv.inputWatts", "mppt.inputWatts",
+        "pvAllPower", "pv.allWatts", "pvInputPower", "pv.inWatts",
+        "grid.inputWatts", "ac.inputWatts", "dc.inputWatts"
+    ]
+    out_candidates = [
+        "bmsMaster.outputWatts", "pd.outputWatts", "ac.outputWatts",
+        "outputWatts", "sysPower", "outputPower"
+    ]
+    in_w  = None
+    out_w = None
+
+    for k in in_candidates:
+        v = g(k)
+        if v is not None:
+            in_w = (in_w or 0.0) + v
+    for k in out_candidates:
+        v = g(k)
+        if v is not None:
+            out_w = (out_w or 0.0) + v
+
+    # Fallback-Heuristik: alle Keys, die 'inputWatts'/'outputWatts' enthalten, aufsummieren
+    if in_w is None:
+        in_w = sum_by_contains("inputWatts")
+    if out_w is None:
+        out_w = sum_by_contains("outputWatts")
+
+    # weiterer Fallback: manche liefern nur ein Gesamtleistungsfeld
+    power_w = None
+    if in_w is not None or out_w is not None:
+        power_w = (out_w or 0.0) - (in_w or 0.0)
+    else:
+        power_w = g("sysPower", "outputPower", "power")  # kann negativ beim Laden sein
+
+    # --- Restzeit ---
+    eta_min = g("remainMinutes")
+    if eta_min is None:
+        eta_sec = g("pd.remainTime", "remainSec")
+        if eta_sec is not None:
+            eta_min = int(max(0, eta_sec // 60))
+
+    # --- PV ---
+    pv_sum = g("pv.inputWatts", "mppt.inputWatts", "pvAllPower", "pv.allWatts", "pvInputPower")
+    if pv_sum is None:
+        pv_sum = sum_by_contains("pv")  # heuristisch (kann zu viel sein, daher nur Fallback)
+
+    pv1 = g("mppt.pv1Watts", "pv.pv1Watts", "pv1InputPower")
+    pv2 = g("mppt.pv2Watts", "pv.pv2Watts", "pv2InputPower")
+
+    # --- Modus ---
+    mode = g("workMode", "inv.cfgAcEnabled", default=None)
+    if mode is None:
+        mode = first_by_suffix(".mode", prefer_numeric=False)
 
     return {
-        "soc": int(soc) if soc is not None else None,
+        "soc": soc,
         "power_w": power_w,
         "mode": mode,
-        "eta_min": eta_m,
+        "eta_min": eta_min,
         "pv_input_w_sum": pv_sum,
-        "pv1_input_w": g("mppt.pv1Watts", "pv.pv1Watts", default=None),
-        "pv2_input_w": g("mppt.pv2Watts", "pv.pv2Watts", default=None)
+        "pv1_input_w": pv1,
+        "pv2_input_w": pv2
     }
+
 
 # ---------- Drawing ----------
 def draw_dashed_line(d, x1, y1, x2, y2, dash=2, gap=2, fill=0, width=1):
@@ -645,6 +719,9 @@ def main():
 
     epd.display(epd.getbuffer(img))
     epd.sleep()
+
+devs = ecoflow_get_device_list()
+print(devs)  # erwartetes Feld: [{"sn":"...","online":1}, ...]
 
 if __name__ == "__main__":
     main()
