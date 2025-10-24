@@ -309,12 +309,16 @@ def ecoflow_get_all_quota(sn):
 
 def ecoflow_status_bkw():
     """
-    Liest GET /iot-open/sign/device/quota/all?sn=... und mappt flexibel:
-    - soc (%)
-    - power_w (positiv: Entladung/Abgabe, negativ: Ladung)
-    - eta_min (Restzeit)
-    - pv_input_w_sum, pv1_input_w, pv2_input_w
-    Schreibt Rohdaten nach ecoflow_quota_last.json zum Nachsehen.
+    Stream/PowerStream-Mapping:
+      - soc:           cmsBattSoc (%)
+      - pv_input_w:    powGetPvSum (W)
+      - load_w:        powGetSysLoad (W)
+      - grid_w:        powGetSysGrid (W) oder gridConnectionPower (W)
+      - power_w:       abgeleitet = load_w - pv_w - grid_w
+                       (>0 = Entladen, <0 = Laden)
+      - eta_min:       (für Stream oft nicht vorhanden -> None)
+      - mode:          aus feedGridMode / energyStrategyOperateMode.*
+    Schreibt Rohdaten nach ecoflow_quota_last.json.
     """
     sn = getattr(api_key, "ECOFLOW_DEVICE_ID", "").strip()
     if not sn:
@@ -341,91 +345,62 @@ def ecoflow_status_bkw():
             "pv_input_w_sum": None, "pv1_input_w": None, "pv2_input_w": None
         }
 
-    # ---------- flexible Finder ----------
-    def first_numeric_by_regex(patterns):
-        """Gibt den ersten numerischen Wert zurück, dessen Key auf ein Regex in patterns matcht."""
-        for pat in patterns:
-            rx = re.compile(pat, re.IGNORECASE)
-            for k, v in q.items():
-                if rx.search(k):
-                    fv = _to_float(v)
-                    if fv is not None:
-                        return fv
-        return None
+    # --- Helper zum Auslesen ---
+    def get_num(key, default=None):
+        v = q.get(key)
+        fv = _to_float(v)
+        return fv if fv is not None else default
 
-    def sum_numeric_by_regex(patterns):
-        """Summiert numerische Werte, deren Keys auf patterns matchen (brauchbar für PV/Inputs/Outputs)."""
-        total = 0.0
-        found = False
-        for pat in patterns:
-            rx = re.compile(pat, re.IGNORECASE)
-            for k, v in q.items():
-                if rx.search(k):
-                    fv = _to_float(v)
-                    if fv is not None:
-                        total += fv
-                        found = True
-        return total if found else None
-
-    def first_value_by_regex(patterns):
-        """Erster (nicht notwendigerweise numerischer) Wert, dessen Key matcht."""
-        for pat in patterns:
-            rx = re.compile(pat, re.IGNORECASE)
-            for k, v in q.items():
-                if rx.search(k):
-                    return v
-        return None
-
-    # ---------- SoC ----------
-    soc = first_numeric_by_regex([
-        r"\b(bms.*\.|)soc\b",        # bmsMaster.soc, bms.soc, soc
-        r"\bsoc\b"
-    ])
+    # ---- SoC ----
+    soc = get_num("cmsBattSoc")
+    if soc is None:
+        soc = get_num("cmsMinDsgSoc")  # schlechter Fallback
     if soc is not None:
-        try: soc = int(round(float(soc)))
+        try: soc = int(round(soc))
         except: pass
 
-    # ---------- Eingangs-/Ausgangsleistung ----------
-    # Kandidaten (breit gefasst: input|in, output|out, pv.*)
-    in_w  = sum_numeric_by_regex([
-        r"\b(input|in) ?(w|watts|power)\b",
-        r"\b(ac|dc|grid)\.(input|in)(w|watts|power)\b",
-        r"\bmppt\.(input|in)(w|watts|power)\b",
-        r"\bpv(\.|)(input|in)(w|watts|power)\b"
-    ])
-    out_w = sum_numeric_by_regex([
-        r"\b(output|out) ?(w|watts|power)\b",
-        r"\b(ac|dc)\.(output|out)(w|watts|power)\b",
-        r"\b(pd|sys)\.(w|watts|power)\b",
-        r"\boutputPower\b"
-    ])
+    # ---- PV ----
+    pv_sum = get_num("powGetPvSum")
 
-    # Manche Firmwares liefern nur ein „power/sysPower“
-    overall = first_numeric_by_regex([r"\b(sys|total)?power\b", r"\bpower\b"])
+    # ---- Load & Grid ----
+    load_w = get_num("powGetSysLoad")
+    grid_w = get_num("powGetSysGrid")
+    if grid_w is None:
+        grid_w = get_num("gridConnectionPower")
 
-    if in_w is None and out_w is None and overall is not None:
-        power_w = overall
+    # ---- Batterie-Leistung aus Bilanz ----
+    power_w = None
+    if (load_w is not None) and (pv_sum is not None) and (grid_w is not None):
+        # Konvention: >0 = Entladen (Abgabe), <0 = Laden (Aufnahme)
+        power_w = (load_w - pv_sum - grid_w)
     else:
-        power_w = (out_w or 0.0) - (in_w or 0.0)
+        # Wenn einzelne Teile fehlen, wenigstens etwas Sinnvolles anzeigen:
+        # Falls nur grid & pv fehlen, nimm load als Proxy (not ideal).
+        if load_w is not None and pv_sum is not None:
+            power_w = (load_w - pv_sum)
+        elif load_w is not None and grid_w is not None:
+            power_w = (load_w - grid_w)
+        elif pv_sum is not None and grid_w is not None:
+            power_w = -(pv_sum + grid_w)  # sehr grob
 
-    # ---------- Restzeit ----------
-    eta_min = first_numeric_by_regex([r"\bremainMinutes?\b", r"\bremainingMinutes?\b"])
-    if eta_min is None:
-        eta_sec = first_numeric_by_regex([r"\b(pd\.)?remain(Time|Sec)\b", r"\bremainingSeconds?\b"])
-        if eta_sec is not None:
-            eta_min = int(max(0, eta_sec // 60))
+    # ---- Restzeit (Stream hat meist keine) ----
+    eta_min = None  # bleibt i.d.R. None bei Stream/PowerStream
 
-    # ---------- PV ----------
-    pv_sum = sum_numeric_by_regex([
-        r"\bpv(All|)\.?input?(w|watts|power)?\b",
-        r"\bmppt\.input(w|watts|power)\b",
-        r"\bmppt\.[a-z0-9]+(w|watts|power)\b",
-    ])
-    pv1 = first_numeric_by_regex([r"\b(mppt\.|pv\.)?pv1(watts?|power)?\b", r"\bpv1InputPower\b"])
-    pv2 = first_numeric_by_regex([r"\b(mppt\.|pv\.)?pv2(watts?|power)?\b", r"\bpv2InputPower\b"])
-
-    # ---------- Modus ----------
-    mode = first_value_by_regex([r"\bworkMode\b", r"\b.*\.mode\b", r"\b(inv\.)?cfgAcEnabled\b"])
+    # ---- Modus / Flags ----
+    # feedGridMode: 0/1 → Einspeisen erlaubt?
+    feed_mode = q.get("feedGridMode")
+    es_self   = q.get("energyStrategyOperateMode.operateSelfPoweredOpen")
+    es_sched  = q.get("energyStrategyOperateMode.operateIntelligentScheduleModeOpen")
+    mode = None
+    if isinstance(feed_mode, (int,float,str)):
+        try:
+            mode = f"FeedMode:{int(float(feed_mode))}"
+        except:
+            mode = f"FeedMode:{feed_mode}"
+    if es_self not in (None, ""):
+        mode = (mode + " | " if mode else "") + f"Self:{es_self}"
+    if es_sched not in (None, ""):
+        mode = (mode + " | " if mode else "") + f"Sched:{es_sched}"
 
     return {
         "soc": soc,
@@ -433,8 +408,8 @@ def ecoflow_status_bkw():
         "mode": mode,
         "eta_min": eta_min,
         "pv_input_w_sum": pv_sum,
-        "pv1_input_w": pv1,
-        "pv2_input_w": pv2
+        "pv1_input_w": None,
+        "pv2_input_w": None
     }
 
 
