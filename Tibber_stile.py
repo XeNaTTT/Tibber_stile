@@ -463,38 +463,43 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     d.rectangle((x, y, x+w, y+h), outline=0, width=2)
     d.text((x+10, y+5), "EcoFlow Stream AC", font=fonts['bold'], fill=0)
 
-    # Richtungspfeil anhand power_w
+    # Pfeilrichtung aus power_w
     arrow = None
     p = st.get('power_w')
     if isinstance(p, (int,float)):
         if p < -10: arrow = "up"     # Laden
         elif p > 10: arrow = "down"  # Entladen
 
+    # Batterie links
     batt_x, batt_y = x+10, y+28
     draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=arrow, fonts=fonts)
 
-    # Infozeilen: alles robust formatieren
+    # Hilfsformatierer
     def fmt_w(v):
         return f"{int(round(v))} W" if isinstance(v, (int,float)) else "-"
 
-    lines = []
-    # Batterie-Leistung zuerst
-    lines.append(f"Leistung: {fmt_w(p)}")
-    # PV / Netz / Last, falls vorhanden
-    if st.get('pv_input_w_sum') is not None:
-        lines.append(f"PV: {fmt_w(st['pv_input_w_sum'])}")
-    if st.get('grid_w') is not None:
-        lines.append(f"Netz: {fmt_w(st['grid_w'])}")
-    if st.get('load_w') is not None:
-        lines.append(f"Last: {fmt_w(st['load_w'])}")
-    # Modus und Restzeit (falls vorhanden)
-    lines.append(f"Modus: {st.get('mode') or '-'}")
-    if st.get('eta_min') is not None:
-        lines.append(f"Restzeit: {minutes_to_hhmm(st['eta_min'])}")
+    # Spalte 1 (links)
+    left_col_x  = batt_x + 130
+    left_col_y  = batt_y - 4
+    line_h      = 18
 
-    # Zeichnen
-    for i, t in enumerate(lines[:4]):  # 4 Zeilen passen sicher ins Box-Layout
-        d.text((batt_x+120, batt_y - 4 + i*16), t, font=fonts['small'], fill=0)
+    d.text((left_col_x, left_col_y + 0*line_h),
+           f"SoC: {st.get('soc') or '-'}%", font=fonts['small'], fill=0)
+    d.text((left_col_x, left_col_y + 1*line_h),
+           f"Leistung: {fmt_w(p)}", font=fonts['small'], fill=0)
+    d.text((left_col_x, left_col_y + 2*line_h),
+           f"Modus: {st.get('mode') or '-'}", font=fonts['small'], fill=0)
+
+    # Spalte 2 (rechts)
+    right_col_x = left_col_x + 160
+    d.text((right_col_x, left_col_y + 0*line_h),
+           f"Netz: {fmt_w(st.get('grid_w'))}", font=fonts['small'], fill=0)
+    d.text((right_col_x, left_col_y + 1*line_h),
+           f"Last: {fmt_w(st.get('load_w'))}", font=fonts['small'], fill=0)
+    if st.get('pv_input_w_sum') is not None:
+        d.text((right_col_x, left_col_y + 2*line_h),
+               f"PV: {fmt_w(st.get('pv_input_w_sum'))}", font=fonts['small'], fill=0)
+
 
 
 def draw_info_box(d, info, fonts, y, width):
@@ -593,7 +598,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     hour_ticks(tr, X0+PW)
 
     # Legende Leistung
-    d.text((X1-180, Y0-16), "â€” â€” PV   â€”â€”  Verbrauch", font=fonts['tiny'], fill=0)
+   d.text((X1-180, Y0-16), "-  Strompreis   ----  Verbrauch", font=fonts['tiny'], fill=0)
 
     # Minutengenauer Marker (horizontale Interpolation)
     if cur_price is not None:
@@ -706,9 +711,6 @@ def main():
     epd.display(epd.getbuffer(img))
     epd.sleep()
 
-# Einmal ausführen:
-data = ecoflow_get_all_quota(api_key.ECOFLOW_DEVICE_ID)
-print("EcoFlow keys:", sorted(list(data.keys()))[:40], "...")  # erste ~40 Keys
 
 if __name__ == "__main__":
     main()
