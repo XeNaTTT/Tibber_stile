@@ -492,7 +492,7 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     d.text((title_x, title_y), title, font=fonts['bold'], fill=0)
 
     # --- Pfeil leicht nach rechts versetzt ---
-    arrow_offset = 10  # nur Pfeil nach rechts verschieben
+    arrow_offset = 20  # nur Pfeil nach rechts verschieben
     if arrow == "up":
         d.polygon([
             (title_x + 150 + arrow_offset, title_y + 20),
@@ -511,7 +511,7 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=None, fonts=fonts)
 
     # --- Textinfos (alle 5px nach rechts) ---
-    text_offset = 5
+    text_offset = 10
     lines_left = [
         f"Leistung: {int(p)} W" if isinstance(p, (int, float)) else "Leistung: —",
         f"PV-Ertrag: {int(st.get('pv_w') or 0)} W"
