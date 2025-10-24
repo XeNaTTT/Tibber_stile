@@ -309,24 +309,24 @@ def ecoflow_get_all_quota(sn):
 
 def ecoflow_status_bkw():
     """
-    Stream/PowerStream-Mapping:
-      - soc:           cmsBattSoc (%)
-      - pv_input_w:    powGetPvSum (W)
-      - load_w:        powGetSysLoad (W)
-      - grid_w:        powGetSysGrid (W) oder gridConnectionPower (W)
-      - power_w:       abgeleitet = load_w - pv_w - grid_w
-                       (>0 = Entladen, <0 = Laden)
-      - eta_min:       (für Stream oft nicht vorhanden -> None)
-      - mode:          aus feedGridMode / energyStrategyOperateMode.*
-    Schreibt Rohdaten nach ecoflow_quota_last.json.
+    Mapping für EcoFlow Stream/PowerStream basierend auf deinen Keys.
+    - soc: cmsBattSoc (%)
+    - pv_input_w_sum: powGetPvSum (W)
+    - load_w: powGetSysLoad (W)
+    - grid_w: powGetSysGrid (W) oder gridConnectionPower (W)
+    - power_w: bevorzugt aus powGetBpCms (umgedrehtes Vorzeichen), sonst Bilanz = load - pv - grid
+               (>0 Entladen, <0 Laden)
+    - mode: kompakt aus feedGridMode + energyStrategyOperateMode.*
+    - eta_min: bei Stream meist nicht vorhanden -> None
+    Zusätzlich: Rohdaten-Dump nach ecoflow_quota_last.json.
     """
     sn = getattr(api_key, "ECOFLOW_DEVICE_ID", "").strip()
     if not sn:
         raise RuntimeError("ECOFLOW_DEVICE_ID fehlt in api_key.py")
 
     try:
-        q = ecoflow_get_all_quota(sn)  # dict mit flachen Keys
-        # Dump zum Nachsehen
+        q = ecoflow_get_all_quota(sn)
+        # Debug-Dump
         try:
             with open("/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_quota_last.json", "w") as f:
                 json.dump(q, f, indent=2)
@@ -342,74 +342,58 @@ def ecoflow_status_bkw():
                 pass
         return {
             "soc": None, "power_w": None, "mode": None, "eta_min": None,
-            "pv_input_w_sum": None, "pv1_input_w": None, "pv2_input_w": None
+            "pv_input_w_sum": None, "pv1_input_w": None, "pv2_input_w": None,
+            "grid_w": None, "load_w": None
         }
 
-    # --- Helper zum Auslesen ---
-    def get_num(key, default=None):
+    def num(key, default=None):
         v = q.get(key)
         fv = _to_float(v)
         return fv if fv is not None else default
 
-    # ---- SoC ----
-    soc = get_num("cmsBattSoc")
-    if soc is None:
-        soc = get_num("cmsMinDsgSoc")  # schlechter Fallback
+    # Kerngrößen
+    soc     = num("cmsBattSoc")
     if soc is not None:
         try: soc = int(round(soc))
         except: pass
 
-    # ---- PV ----
-    pv_sum = get_num("powGetPvSum")
-
-    # ---- Load & Grid ----
-    load_w = get_num("powGetSysLoad")
-    grid_w = get_num("powGetSysGrid")
+    pv_sum  = num("powGetPvSum")
+    load_w  = num("powGetSysLoad")
+    grid_w  = num("powGetSysGrid")
     if grid_w is None:
-        grid_w = get_num("gridConnectionPower")
+        grid_w = num("gridConnectionPower")
 
-    # ---- Batterie-Leistung aus Bilanz ----
-    power_w = None
-    if (load_w is not None) and (pv_sum is not None) and (grid_w is not None):
-        # Konvention: >0 = Entladen (Abgabe), <0 = Laden (Aufnahme)
-        power_w = (load_w - pv_sum - grid_w)
+    # Batterie-Leistung
+    bp      = num("powGetBpCms")     # beobachtet: negativ bei Entladen
+    if bp is not None:
+        power_w = -bp                # Konvention: >0 Entladen, <0 Laden
     else:
-        # Wenn einzelne Teile fehlen, wenigstens etwas Sinnvolles anzeigen:
-        # Falls nur grid & pv fehlen, nimm load als Proxy (not ideal).
-        if load_w is not None and pv_sum is not None:
-            power_w = (load_w - pv_sum)
-        elif load_w is not None and grid_w is not None:
-            power_w = (load_w - grid_w)
-        elif pv_sum is not None and grid_w is not None:
-            power_w = -(pv_sum + grid_w)  # sehr grob
+        power_w = None
+        if (load_w is not None) and (pv_sum is not None) and (grid_w is not None):
+            power_w = (load_w - pv_sum - grid_w)
 
-    # ---- Restzeit (Stream hat meist keine) ----
-    eta_min = None  # bleibt i.d.R. None bei Stream/PowerStream
-
-    # ---- Modus / Flags ----
-    # feedGridMode: 0/1 → Einspeisen erlaubt?
-    feed_mode = q.get("feedGridMode")
+    # Modus kompakt
+    feed_mode = q.get("feedGridMode")  # 0/1
     es_self   = q.get("energyStrategyOperateMode.operateSelfPoweredOpen")
     es_sched  = q.get("energyStrategyOperateMode.operateIntelligentScheduleModeOpen")
-    mode = None
-    if isinstance(feed_mode, (int,float,str)):
-        try:
-            mode = f"FeedMode:{int(float(feed_mode))}"
-        except:
-            mode = f"FeedMode:{feed_mode}"
-    if es_self not in (None, ""):
-        mode = (mode + " | " if mode else "") + f"Self:{es_self}"
-    if es_sched not in (None, ""):
-        mode = (mode + " | " if mode else "") + f"Sched:{es_sched}"
+    mode_parts = []
+    if feed_mode is not None:
+        try: mode_parts.append(f"Feed:{int(float(feed_mode))}")
+        except: mode_parts.append(f"Feed:{feed_mode}")
+    if es_self is not None:  mode_parts.append(f"Self:{es_self}")
+    if es_sched is not None: mode_parts.append(f"Sched:{es_sched}")
+    mode = " | ".join(map(str, mode_parts)) if mode_parts else None
 
     return {
         "soc": soc,
         "power_w": power_w,
         "mode": mode,
-        "eta_min": eta_min,
+        "eta_min": None,
         "pv_input_w_sum": pv_sum,
         "pv1_input_w": None,
-        "pv2_input_w": None
+        "pv2_input_w": None,
+        "grid_w": grid_w,
+        "load_w": load_w
     }
 
 
@@ -454,10 +438,14 @@ def draw_weather_box(d, x, y, w, h, fonts, sun_today, sun_tomorrow=None):
         d.text((x+60, y+46), f"Sonnenstunden morgen: {m_val:.1f} h", font=fonts['small'], fill=0)
 
 def minutes_to_hhmm(m):
-    if m is None: return "â€”"
+    if m is None:
+        return "-"
     try:
-        m = int(m); return f"{m//60:02d}:{m%60:02d} h"
-    except: return "â€”"
+        m = int(m)
+        return f"{m//60:02d}:{m%60:02d} h"
+    except:
+        return "-"
+
 
 def draw_battery(d, x, y, w, h, soc, arrow=None, fonts=None):
     soc = max(0, min(100, int(soc) if soc is not None else 0))
@@ -474,27 +462,40 @@ def draw_battery(d, x, y, w, h, soc, arrow=None, fonts=None):
 def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     d.rectangle((x, y, x+w, y+h), outline=0, width=2)
     d.text((x+10, y+5), "EcoFlow Stream AC", font=fonts['bold'], fill=0)
-    arrow=None
-    mode = (str(st.get('mode')) or "").lower()
+
+    # Richtungspfeil anhand power_w
+    arrow = None
     p = st.get('power_w')
-    if "charg" in mode: arrow="up"
-    elif "discharg" in mode or "feed" in mode: arrow="down"
-    elif isinstance(p,(int,float)):
-        if p < -10: arrow="up"
-        elif p > 10: arrow="down"
+    if isinstance(p, (int,float)):
+        if p < -10: arrow = "up"     # Laden
+        elif p > 10: arrow = "down"  # Entladen
+
     batt_x, batt_y = x+10, y+28
     draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=arrow, fonts=fonts)
-    lines = [
-        f"Leistung: {int(p)} W" if isinstance(p,(int,float)) else "Leistung: â€”",
-        f"Modus: {st.get('mode') or 'â€”'}",
-        f"Restzeit: {minutes_to_hhmm(st.get('eta_min'))}"
-    ]
-    # optional PV-Zeile, wenn vorhanden
-    pv_sum = st.get('pv_input_w_sum')
-    if isinstance(pv_sum,(int,float)):
-        lines.insert(0, f"PV ges.: {int(pv_sum)} W")
-    for i, t in enumerate(lines):
+
+    # Infozeilen: alles robust formatieren
+    def fmt_w(v):
+        return f"{int(round(v))} W" if isinstance(v, (int,float)) else "-"
+
+    lines = []
+    # Batterie-Leistung zuerst
+    lines.append(f"Leistung: {fmt_w(p)}")
+    # PV / Netz / Last, falls vorhanden
+    if st.get('pv_input_w_sum') is not None:
+        lines.append(f"PV: {fmt_w(st['pv_input_w_sum'])}")
+    if st.get('grid_w') is not None:
+        lines.append(f"Netz: {fmt_w(st['grid_w'])}")
+    if st.get('load_w') is not None:
+        lines.append(f"Last: {fmt_w(st['load_w'])}")
+    # Modus und Restzeit (falls vorhanden)
+    lines.append(f"Modus: {st.get('mode') or '-'}")
+    if st.get('eta_min') is not None:
+        lines.append(f"Restzeit: {minutes_to_hhmm(st['eta_min'])}")
+
+    # Zeichnen
+    for i, t in enumerate(lines[:4]):  # 4 Zeilen passen sicher ins Box-Layout
         d.text((batt_x+120, batt_y - 4 + i*16), t, font=fonts['small'], fill=0)
+
 
 def draw_info_box(d, info, fonts, y, width):
     x0 = 10
