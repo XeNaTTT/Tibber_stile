@@ -5,6 +5,7 @@ import sys, os, math, json, requests, datetime as dt, sqlite3, logging
 from PIL import Image, ImageDraw, ImageFont
 import pandas as pd, numpy as np
 from urllib.parse import urlencode
+import re
 
 # Zeitzone
 try:
@@ -29,6 +30,17 @@ ECOFLOW_FALLBACK= '/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_status.json'
 logging.basicConfig(level=logging.INFO)
 
 # ---------- Utils ----------
+def _to_float(x):
+    """Robuste Zahl-Konvertierung: akzeptiert int/float/Strings (inkl. Vorzeichen, Komma)."""
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).strip().replace(",", ".")
+    # erlaube +/-, eine Dezimalstelle, keine anderen Zeichen
+    m = re.fullmatch(r"[+-]?\d+(?:\.\d+)?", s)
+    return float(s) if m else None
+
 def save_cache(data, fn):
     with open(fn, 'w') as f: json.dump(data, f)
 
@@ -297,8 +309,12 @@ def ecoflow_get_all_quota(sn):
 
 def ecoflow_status_bkw():
     """
-    Holt alle Quotas und mappt generisch auf das Display.
-    Schreibt zusätzlich die Rohdaten nach ecoflow_quota_last.json.
+    Liest GET /iot-open/sign/device/quota/all?sn=... und mappt flexibel:
+    - soc (%)
+    - power_w (positiv: Entladung/Abgabe, negativ: Ladung)
+    - eta_min (Restzeit)
+    - pv_input_w_sum, pv1_input_w, pv2_input_w
+    Schreibt Rohdaten nach ecoflow_quota_last.json zum Nachsehen.
     """
     sn = getattr(api_key, "ECOFLOW_DEVICE_ID", "").strip()
     if not sn:
@@ -306,7 +322,7 @@ def ecoflow_status_bkw():
 
     try:
         q = ecoflow_get_all_quota(sn)  # dict mit flachen Keys
-        # Debug-Dump zum Nachsehen
+        # Dump zum Nachsehen
         try:
             with open("/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_quota_last.json", "w") as f:
                 json.dump(q, f, indent=2)
@@ -325,98 +341,91 @@ def ecoflow_status_bkw():
             "pv_input_w_sum": None, "pv1_input_w": None, "pv2_input_w": None
         }
 
-    # kleine Helfer für flexible Suche
-    def g(*keys, default=None):
-        for k in keys:
-            if k in q and q[k] is not None:
-                fv = _to_float(q[k])
-                return fv if fv is not None else q[k]
-        return default
-
-    def first_by_suffix(suffix, prefer_numeric=True):
-        for k, v in q.items():
-            if k.endswith(suffix):
-                if prefer_numeric:
+    # ---------- flexible Finder ----------
+    def first_numeric_by_regex(patterns):
+        """Gibt den ersten numerischen Wert zurück, dessen Key auf ein Regex in patterns matcht."""
+        for pat in patterns:
+            rx = re.compile(pat, re.IGNORECASE)
+            for k, v in q.items():
+                if rx.search(k):
                     fv = _to_float(v)
                     if fv is not None:
                         return fv
-                else:
+        return None
+
+    def sum_numeric_by_regex(patterns):
+        """Summiert numerische Werte, deren Keys auf patterns matchen (brauchbar für PV/Inputs/Outputs)."""
+        total = 0.0
+        found = False
+        for pat in patterns:
+            rx = re.compile(pat, re.IGNORECASE)
+            for k, v in q.items():
+                if rx.search(k):
+                    fv = _to_float(v)
+                    if fv is not None:
+                        total += fv
+                        found = True
+        return total if found else None
+
+    def first_value_by_regex(patterns):
+        """Erster (nicht notwendigerweise numerischer) Wert, dessen Key matcht."""
+        for pat in patterns:
+            rx = re.compile(pat, re.IGNORECASE)
+            for k, v in q.items():
+                if rx.search(k):
                     return v
         return None
 
-    def sum_by_contains(substr):
-        s = 0.0; found = False
-        for k, v in q.items():
-            if substr in k:
-                fv = _to_float(v)
-                if fv is not None:
-                    s += fv; found = True
-        return s if found else None
-
-    # --- SoC ---
-    soc = g("bmsMaster.soc", "bmsPack.soc", "bms.soc", "soc")
-    if soc is None:
-        # Fallback: nimm erstes Feld, das auf .soc endet (z. B. bms0.soc)
-        soc = first_by_suffix(".soc")
+    # ---------- SoC ----------
+    soc = first_numeric_by_regex([
+        r"\b(bms.*\.|)soc\b",        # bmsMaster.soc, bms.soc, soc
+        r"\bsoc\b"
+    ])
     if soc is not None:
         try: soc = int(round(float(soc)))
         except: pass
 
-    # --- Leistung ---
-    # Kandidaten für Eingangs-/Ausgangsleistung
-    in_candidates  = [
-        "bmsMaster.inputWatts", "pv.inputWatts", "mppt.inputWatts",
-        "pvAllPower", "pv.allWatts", "pvInputPower", "pv.inWatts",
-        "grid.inputWatts", "ac.inputWatts", "dc.inputWatts"
-    ]
-    out_candidates = [
-        "bmsMaster.outputWatts", "pd.outputWatts", "ac.outputWatts",
-        "outputWatts", "sysPower", "outputPower"
-    ]
-    in_w  = None
-    out_w = None
+    # ---------- Eingangs-/Ausgangsleistung ----------
+    # Kandidaten (breit gefasst: input|in, output|out, pv.*)
+    in_w  = sum_numeric_by_regex([
+        r"\b(input|in) ?(w|watts|power)\b",
+        r"\b(ac|dc|grid)\.(input|in)(w|watts|power)\b",
+        r"\bmppt\.(input|in)(w|watts|power)\b",
+        r"\bpv(\.|)(input|in)(w|watts|power)\b"
+    ])
+    out_w = sum_numeric_by_regex([
+        r"\b(output|out) ?(w|watts|power)\b",
+        r"\b(ac|dc)\.(output|out)(w|watts|power)\b",
+        r"\b(pd|sys)\.(w|watts|power)\b",
+        r"\boutputPower\b"
+    ])
 
-    for k in in_candidates:
-        v = g(k)
-        if v is not None:
-            in_w = (in_w or 0.0) + v
-    for k in out_candidates:
-        v = g(k)
-        if v is not None:
-            out_w = (out_w or 0.0) + v
+    # Manche Firmwares liefern nur ein „power/sysPower“
+    overall = first_numeric_by_regex([r"\b(sys|total)?power\b", r"\bpower\b"])
 
-    # Fallback-Heuristik: alle Keys, die 'inputWatts'/'outputWatts' enthalten, aufsummieren
-    if in_w is None:
-        in_w = sum_by_contains("inputWatts")
-    if out_w is None:
-        out_w = sum_by_contains("outputWatts")
-
-    # weiterer Fallback: manche liefern nur ein Gesamtleistungsfeld
-    power_w = None
-    if in_w is not None or out_w is not None:
-        power_w = (out_w or 0.0) - (in_w or 0.0)
+    if in_w is None and out_w is None and overall is not None:
+        power_w = overall
     else:
-        power_w = g("sysPower", "outputPower", "power")  # kann negativ beim Laden sein
+        power_w = (out_w or 0.0) - (in_w or 0.0)
 
-    # --- Restzeit ---
-    eta_min = g("remainMinutes")
+    # ---------- Restzeit ----------
+    eta_min = first_numeric_by_regex([r"\bremainMinutes?\b", r"\bremainingMinutes?\b"])
     if eta_min is None:
-        eta_sec = g("pd.remainTime", "remainSec")
+        eta_sec = first_numeric_by_regex([r"\b(pd\.)?remain(Time|Sec)\b", r"\bremainingSeconds?\b"])
         if eta_sec is not None:
             eta_min = int(max(0, eta_sec // 60))
 
-    # --- PV ---
-    pv_sum = g("pv.inputWatts", "mppt.inputWatts", "pvAllPower", "pv.allWatts", "pvInputPower")
-    if pv_sum is None:
-        pv_sum = sum_by_contains("pv")  # heuristisch (kann zu viel sein, daher nur Fallback)
+    # ---------- PV ----------
+    pv_sum = sum_numeric_by_regex([
+        r"\bpv(All|)\.?input?(w|watts|power)?\b",
+        r"\bmppt\.input(w|watts|power)\b",
+        r"\bmppt\.[a-z0-9]+(w|watts|power)\b",
+    ])
+    pv1 = first_numeric_by_regex([r"\b(mppt\.|pv\.)?pv1(watts?|power)?\b", r"\bpv1InputPower\b"])
+    pv2 = first_numeric_by_regex([r"\b(mppt\.|pv\.)?pv2(watts?|power)?\b", r"\bpv2InputPower\b"])
 
-    pv1 = g("mppt.pv1Watts", "pv.pv1Watts", "pv1InputPower")
-    pv2 = g("mppt.pv2Watts", "pv.pv2Watts", "pv2InputPower")
-
-    # --- Modus ---
-    mode = g("workMode", "inv.cfgAcEnabled", default=None)
-    if mode is None:
-        mode = first_by_suffix(".mode", prefer_numeric=False)
+    # ---------- Modus ----------
+    mode = first_value_by_regex([r"\bworkMode\b", r"\b.*\.mode\b", r"\b(inv\.)?cfgAcEnabled\b"])
 
     return {
         "soc": soc,
@@ -427,6 +436,7 @@ def ecoflow_status_bkw():
         "pv1_input_w": pv1,
         "pv2_input_w": pv2
     }
+
 
 
 # ---------- Drawing ----------
@@ -720,8 +730,9 @@ def main():
     epd.display(epd.getbuffer(img))
     epd.sleep()
 
-devs = ecoflow_get_device_list()
-print(devs)  # erwartetes Feld: [{"sn":"...","online":1}, ...]
+# Einmal ausführen:
+data = ecoflow_get_all_quota(api_key.ECOFLOW_DEVICE_ID)
+print("EcoFlow keys:", sorted(list(data.keys()))[:40], "...")  # erste ~40 Keys
 
 if __name__ == "__main__":
     main()
