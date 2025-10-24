@@ -140,7 +140,18 @@ def series_from_db(table, column, slots_dt):
     return pd.Series(out)
 
 def get_pv_series(slots_dt):
-    return series_from_db("pv_log", "dtu_power", slots_dt)
+    """Holt PV-Leistung aus EcoFlow (powGetPvSum) und füllt konstant über den Tag."""
+    try:
+        eco = ecoflow_status()  # aktueller EcoFlow-Call
+        pv_watt = float(eco.get("pv_w")) if "pv_w" in eco else float(eco.get("powGetPvSum", 0))
+        logging.info(f"EcoFlow PV aktuell: {pv_watt} W")
+
+        # gleichmäßig verteilen – eine konstante Linie über den Zeitraum
+        return pd.Series([pv_watt] * len(slots_dt))
+    except Exception as e:
+        logging.error(f"PV aus EcoFlow fehlgeschlagen: {e}")
+        return pd.Series([0.0] * len(slots_dt))
+
 
 def get_consumption_series(slots_dt):
     return series_from_db("consumption_log", "consumption_w", slots_dt)
