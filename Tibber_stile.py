@@ -694,6 +694,14 @@ def main():
     else:
         left, right = (load_cache(CACHE_YESTERDAY) or {"data": []})['data'], pi['today']
         labels = ("Gestern", "Heute")
+    
+# EcoFlow-Status früh laden (robust) – damit eco immer definiert ist
+    eco = {}
+    try:
+        eco = ecoflow_status_bkw()  # liefert dict mit u.a. pv_input_w_sum, powGetPvSum, powGetSysGrid, powGetSysLoad, power_w, cmsBattSoc
+    except Exception as e:
+        logging.error(f"EcoFlow Status fehlgeschlagen: {e}")
+        eco = {}
 
     tl_dt, _ = expand_to_15min(left)
     tr_dt, _ = expand_to_15min(right)
