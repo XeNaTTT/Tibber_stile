@@ -4,6 +4,7 @@
 import sys, os, math, json, requests, datetime as dt, sqlite3, logging
 from PIL import Image, ImageDraw, ImageFont
 import pandas as pd, numpy as np
+from urllib.parse import urlencode
 
 # Zeitzone
 try:
@@ -45,7 +46,7 @@ def safe_get(d, *path, default=None):
 # ---------- Tibber ----------
 def tibber_priceinfo():
     if not getattr(api_key, "API_KEY", None) or str(api_key.API_KEY).startswith("DEIN_"):
-        raise RuntimeError("Tibber API_KEY fehlt/Platzhalter. Trage einen gültigen Token in api_key.py ein.")
+        raise RuntimeError("Tibber API_KEY fehlt/Platzhalter. Trage einen gÃ¼ltigen Token in api_key.py ein.")
     hdr = {
         "Authorization": f"Bearer {api_key.API_KEY}",
         "Content-Type": "application/json"
@@ -215,11 +216,11 @@ def _six_digit_nonce():
 
 def _flatten_params(obj, prefix=""):
     """
-    Flacht dict/list gemäß Doku ab:
+    Flacht dict/list gemÃ¤ÃŸ Doku ab:
     - dict:   deviceInfo.id=1
     - list:   ids[0]=1&ids[1]=2
     - nested: params.cmdSet=11&params.id=24 ...
-    Liefert Liste (key, value) -> später ASCII-sortiert.
+    Liefert Liste (key, value) -> spÃ¤ter ASCII-sortiert.
     """
     items = []
     if isinstance(obj, dict):
@@ -237,8 +238,8 @@ def _flatten_params(obj, prefix=""):
 def _build_sign_string(params_dict, access_key, nonce, timestamp):
     """
     1) Body/Query-Objekt flatten + ASCII-sortieren
-    2) accessKey, nonce, timestamp anhängen
-    3) Ergebnis-String für HMAC (UTF-8)
+    2) accessKey, nonce, timestamp anhÃ¤ngen
+    3) Ergebnis-String fÃ¼r HMAC (UTF-8)
     """
     kv = _flatten_params(params_dict) if params_dict else []
     kv.sort(key=lambda kv_: kv_[0])  # ASCII-sortiert
@@ -249,29 +250,32 @@ def _build_sign_string(params_dict, access_key, nonce, timestamp):
 def _hmac_sha256_hex(secret_key, msg):
     return hmac.new(secret_key.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
 
-def _signed_headers(access_key, secret_key, params_dict):
+def _signed_headers(access_key, secret_key, params_dict, content_type=None):
     ts = str(int(time.time()*1000))
     nonce = _six_digit_nonce()
     sign_str = _build_sign_string(params_dict, access_key, nonce, ts)
     sig = _hmac_sha256_hex(secret_key, sign_str)
-    return {
-        "Content-Type": "application/json;charset=UTF-8",
+    hdr = {
         "accessKey": access_key,
         "nonce": nonce,
         "timestamp": ts,
         "sign": sig
     }
+    if content_type:
+        hdr["Content-Type"] = content_type
+    return hdr
 
 def ecoflow_get_device_list():
     base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
     path = "/iot-open/sign/device/list"
-    params = {}  # GET ohne Body; signiert werden nur accessKey/nonce/timestamp
-    hdr = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, params)
+    params = {}  # keine GET-Parameter
+    hdr = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, params, content_type=None)
     url = f"{base}{path}"
     r = requests.get(url, headers=hdr, timeout=12)
-    j = {}
-    try: j = r.json()
-    except: j = {"raw": r.text}
+    try:
+        j = r.json()
+    except Exception:
+        j = {"raw": r.text}
     if r.status_code == 200 and str(j.get("code")) == "0":
         return j.get("data", []) or []
     raise RuntimeError(f"EcoFlow device/list fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
@@ -280,12 +284,13 @@ def ecoflow_get_all_quota(sn):
     base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
     path = "/iot-open/sign/device/quota/all"
     query = {"sn": sn}
-    hdr = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, query)
+    hdr = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, query, content_type=None)
     url = f"{base}{path}?{urlencode(query)}"
     r = requests.get(url, headers=hdr, timeout=12)
-    j = {}
-    try: j = r.json()
-    except: j = {"raw": r.text}
+    try:
+        j = r.json()
+    except Exception:
+        j = {"raw": r.text}
     if r.status_code == 200 and str(j.get("code")) == "0":
         return j.get("data", {}) or {}
     raise RuntimeError(f"EcoFlow quota/all fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
@@ -390,10 +395,10 @@ def draw_weather_box(d, x, y, w, h, fonts, sun_today, sun_tomorrow=None):
         d.text((x+60, y+46), f"Sonnenstunden morgen: {m_val:.1f} h", font=fonts['small'], fill=0)
 
 def minutes_to_hhmm(m):
-    if m is None: return "—"
+    if m is None: return "â€”"
     try:
         m = int(m); return f"{m//60:02d}:{m%60:02d} h"
-    except: return "—"
+    except: return "â€”"
 
 def draw_battery(d, x, y, w, h, soc, arrow=None, fonts=None):
     soc = max(0, min(100, int(soc) if soc is not None else 0))
@@ -421,8 +426,8 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     batt_x, batt_y = x+10, y+28
     draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=arrow, fonts=fonts)
     lines = [
-        f"Leistung: {int(p)} W" if isinstance(p,(int,float)) else "Leistung: —",
-        f"Modus: {st.get('mode') or '—'}",
+        f"Leistung: {int(p)} W" if isinstance(p,(int,float)) else "Leistung: â€”",
+        f"Modus: {st.get('mode') or 'â€”'}",
         f"Restzeit: {minutes_to_hhmm(st.get('eta_min'))}"
     ]
     # optional PV-Zeile, wenn vorhanden
@@ -528,7 +533,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     hour_ticks(tr, X0+PW)
 
     # Legende Leistung
-    d.text((X1-180, Y0-16), "— — PV   ——  Verbrauch", font=fonts['tiny'], fill=0)
+    d.text((X1-180, Y0-16), "â€” â€” PV   â€”â€”  Verbrauch", font=fonts['tiny'], fill=0)
 
     # Minutengenauer Marker (horizontale Interpolation)
     if cur_price is not None:
@@ -624,7 +629,7 @@ def main():
     # Info-Zeile tiefer
     draw_info_box(d, info, fonts, y=top_h + margin + 6, width=w-20)
 
-    # Chart kleiner in der Höhe + Platz für Stunden
+    # Chart kleiner in der HÃ¶he + Platz fÃ¼r Stunden
     chart_top = top_h + margin + 40
     chart_area = (int(w*0.06), chart_top, w - int(w*0.06), h-70)
 
