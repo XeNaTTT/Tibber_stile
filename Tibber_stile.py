@@ -476,37 +476,42 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     p = st.get('power_w')
     arrow = None
     mode = (st.get('mode') or "").lower()
+
     if "charg" in mode:
         arrow = "up"
     elif "discharg" in mode or "feed" in mode:
         arrow = "down"
     elif isinstance(p, (int, float)):
         if p < -10:
-            arrow = "up"     # Laden
+            arrow = "up"
         elif p > 10:
-            arrow = "down"   # Entladen
+            arrow = "down"
 
-    # --- Überschrift + Pfeil nebeneinander ---
+    # --- Überschrift ---
     title_x, title_y = x + 10, y + 5
     d.text((title_x, title_y), title, font=fonts['bold'], fill=0)
+
+    # --- Pfeil leicht nach rechts versetzt ---
+    arrow_offset = 10  # nur Pfeil nach rechts verschieben
     if arrow == "up":
         d.polygon([
-            (title_x + 150, title_y + 20),
-            (title_x + 160, title_y + 20),
-            (title_x + 155, title_y + 5)
+            (title_x + 150 + arrow_offset, title_y + 20),
+            (title_x + 160 + arrow_offset, title_y + 20),
+            (title_x + 155 + arrow_offset, title_y + 5)
         ], fill=0)
     elif arrow == "down":
         d.polygon([
-            (title_x + 150, title_y + 5),
-            (title_x + 160, title_y + 5),
-            (title_x + 155, title_y + 20)
+            (title_x + 150 + arrow_offset, title_y + 5),
+            (title_x + 160 + arrow_offset, title_y + 5),
+            (title_x + 155 + arrow_offset, title_y + 20)
         ], fill=0)
 
-    # --- Batterie ---
+    # --- Batterie unverändert ---
     batt_x, batt_y = x + 10, y + 28
     draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=None, fonts=fonts)
 
-    # --- Textinfos in 2 Spalten ---
+    # --- Textinfos (alle 5px nach rechts) ---
+    text_offset = 5
     lines_left = [
         f"Leistung: {int(p)} W" if isinstance(p, (int, float)) else "Leistung: —",
         f"PV-Ertrag: {int(st.get('pv_w') or 0)} W"
@@ -517,9 +522,9 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     ]
 
     for i, t in enumerate(lines_left):
-        d.text((batt_x + 120, batt_y - 4 + i * 16), t, font=fonts['small'], fill=0)
+        d.text((batt_x + 120 + text_offset, batt_y - 4 + i * 16), t, font=fonts['small'], fill=0)
     for i, t in enumerate(lines_right):
-        d.text((batt_x + 260, batt_y - 4 + i * 16), t, font=fonts['small'], fill=0)
+        d.text((batt_x + 260 + text_offset, batt_y - 4 + i * 16), t, font=fonts['small'], fill=0)
 
 
 def draw_info_box(d, info, fonts, y, width):
