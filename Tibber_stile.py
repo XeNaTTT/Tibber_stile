@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import sys, os, math, json, requests, datetime as dt, sqlite3, logging, random, time, hmac, hashlib
-from urllib.parse import urlencode
+import sys, os, math, json, requests, datetime as dt, sqlite3, logging
 from PIL import Image, ImageDraw, ImageFont
 import pandas as pd, numpy as np
+from urllib.parse import urlencode
+import re
 
 # Zeitzone
 try:
@@ -29,6 +30,17 @@ ECOFLOW_FALLBACK= '/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_status.json'
 logging.basicConfig(level=logging.INFO)
 
 # ---------- Utils ----------
+def _to_float(x):
+    """Robuste Zahl-Konvertierung: akzeptiert int/float/Strings (inkl. Vorzeichen, Komma)."""
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).strip().replace(",", ".")
+    # erlaube +/-, eine Dezimalstelle, keine anderen Zeichen
+    m = re.fullmatch(r"[+-]?\d+(?:\.\d+)?", s)
+    return float(s) if m else None
+
 def save_cache(data, fn):
     with open(fn, 'w') as f: json.dump(data, f)
 
@@ -37,17 +49,20 @@ def load_cache(fn):
         with open(fn) as f: return json.load(f)
     return None
 
-def _to_float(x):
-    try:
-        return float(x)
-    except Exception:
-        return None
+def safe_get(d, *path, default=None):
+    for k in path:
+        if d is None: return default
+        d = d.get(k)
+    return d if d is not None else default
 
 # ---------- Tibber ----------
 def tibber_priceinfo():
     if not getattr(api_key, "API_KEY", None) or str(api_key.API_KEY).startswith("DEIN_"):
-        raise RuntimeError("Tibber API_KEY fehlt/Platzhalter. Trage einen gültigen Token in api_key.py ein.")
-    hdr = {"Authorization": f"Bearer {api_key.API_KEY}", "Content-Type": "application/json"}
+        raise RuntimeError("Tibber API_KEY fehlt/Platzhalter. Trage einen gÃ¼ltigen Token in api_key.py ein.")
+    hdr = {
+        "Authorization": f"Bearer {api_key.API_KEY}",
+        "Content-Type": "application/json"
+    }
     gql = (
         "{ viewer { homes { currentSubscription { priceInfo { "
         "today { total startsAt } "
@@ -55,15 +70,21 @@ def tibber_priceinfo():
         "current { total startsAt } "
         "}}}}}"
     )
-    r = requests.post('https://api.tibber.com/v1-beta/gql',
-                      json={"query": gql}, headers=hdr, timeout=20)
-    if r.status_code >= 400:
-        logging.error("Tibber HTTP %s: %s", r.status_code, r.text[:300])
-        r.raise_for_status()
-    j = r.json()
+    try:
+        r = requests.post('https://api.tibber.com/v1-beta/gql',
+                          json={"query": gql}, headers=hdr, timeout=20)
+        if r.status_code >= 400:
+            logging.error("Tibber HTTP %s: %s", r.status_code, r.text[:300])
+            r.raise_for_status()
+        j = r.json()
+    except Exception as e:
+        raise RuntimeError(f"Tibber Request fehlgeschlagen: {e}")
     if isinstance(j, dict) and j.get("errors"):
         raise RuntimeError(f"Tibber GraphQL Fehler: {j['errors']}")
-    return j['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
+    try:
+        return j['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
+    except Exception as e:
+        raise RuntimeError(f"Tibber Antwort unerwartet: {e}, payload keys: {list(j.keys())}")
 
 def update_price_cache(pi):
     today = dt.date.today().isoformat()
@@ -71,6 +92,9 @@ def update_price_cache(pi):
     if not ct or ct.get('date') != today:
         if ct: save_cache(ct, CACHE_YESTERDAY)
         save_cache({"date": today, "data": pi['today']}, CACHE_TODAY)
+
+def cached_yesterday():
+    return load_cache(CACHE_YESTERDAY) or {"data": []}
 
 def prepare_info(pi):
     today = pi['today']
@@ -97,6 +121,48 @@ def expand_to_15min(slots):
             ts_list.append(start + dt.timedelta(minutes=15*k))
             val_list.append(price)
     return ts_list, val_list
+
+# ---------- DB-Serien ----------
+def series_from_db(table, column, slots_dt):
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        df = pd.read_sql_query(f"SELECT ts, {column} FROM {table}", conn)
+    except Exception:
+        conn.close(); return pd.Series([0.0]*len(slots_dt))
+    conn.close()
+    df['ts'] = pd.to_datetime(df['ts'], unit='s', utc=True).dt.tz_convert(LOCAL_TZ)
+    df.set_index('ts', inplace=True)
+    df = df.resample('15T').mean().ffill().fillna(0)
+    out = []
+    for t in slots_dt:
+        v = df[column].asof(t) if not df.empty else 0.0
+        out.append(float(0.0 if pd.isna(v) else v))
+    return pd.Series(out)
+
+def get_pv_series(slots_dt, eco=None):
+    """
+    Holt die aktuelle PV-Leistung aus EcoFlow (powGetPvSum) und zeichnet eine
+    konstante Linie über den gezeigten Zeitraum.
+    Nutzt, wenn vorhanden, das bereits ermittelte 'eco'-Dict aus main().
+    """
+    try:
+        if eco is None:
+            eco = ecoflow_status_bkw()
+        # bevorzugter Key aus unserem Mapper:
+        pv_watt = eco.get("pv_input_w_sum")
+        if pv_watt is None:
+            # Fallback: manche Mapper/Antw. liefern 'pv_w'
+            pv_watt = eco.get("pv_w")
+        pv_watt = float(pv_watt or 0.0)
+        logging.info(f"EcoFlow PV aktuell: {pv_watt} W")
+        return pd.Series([pv_watt] * len(slots_dt))
+    except Exception as e:
+        logging.error(f"PV aus EcoFlow fehlgeschlagen: {e}")
+        return pd.Series([0.0] * len(slots_dt))
+
+
+def get_consumption_series(slots_dt):
+    return series_from_db("consumption_log", "consumption_w", slots_dt)
 
 # ---------- Tibber Consumption (hourly -> 15min) ----------
 def tibber_hourly_consumption(last=48):
@@ -132,12 +198,15 @@ def upsample_hourly_to_quarter(ts_15min, hourly_list):
             continue
         i = bisect.bisect_right(hours, t) - 1
         kwh = (vals[i] if i >= 0 else 0.0)
-        out.append(kwh * 1000.0)  # konstante W pro 15-Min Slot
+        out.append(kwh * 1000.0)  # W pro 15-Minuten-Slot (vereinfachtes Profil)
     return pd.Series(out)
 
 # ---------- Wetter ----------
 def sunshine_hours_both(lat, lon, model=None):
-    """Gibt (heute_h, morgen_h) zurück. Open-Meteo sunshine_duration (Sek -> h)."""
+    """
+    Liefert (heute_h, morgen_h) als floats (h).
+    Nutzt Open-Meteo sunshine_duration (Sekunden -> Stunden).
+    """
     try:
         model = model or getattr(api_key, "SUN_MODEL", "icon_seamless")
         url = (
@@ -158,7 +227,8 @@ def sunshine_hours_both(lat, lon, model=None):
         def _h(idx):
             try:
                 sec = arr[idx]
-                if sec is None: return 0.0
+                if sec is None:
+                    return 0.0
                 return round(float(sec)/3600.0, 1)
             except Exception:
                 return 0.0
@@ -167,59 +237,185 @@ def sunshine_hours_both(lat, lon, model=None):
         logging.error("Sunshine fetch failed: %s", e)
         return 0.0, 0.0
 
-# ---------- EcoFlow (RAW) ----------
-def _ef_sign(params: dict, secret_key: str) -> str:
-    s = "&".join(f"{k}={v}" for k,v in sorted(params.items()))
-    return hmac.new(secret_key.encode(), s.encode(), hashlib.sha256).hexdigest()
+# ---------- EcoFlow (BKW/PowerStream, signierte Requests) ----------
+import time, uuid, hmac, hashlib
+from urllib.parse import urlencode
 
-def ecoflow_status_raw():
+def _six_digit_nonce():
+    # 6-stelliger Nonce, wie in der Doku gefordert
+    return f"{int(time.time()*1000) % 900000 + 100000}"
+
+def _flatten_params(obj, prefix=""):
     """
-    Ruft die EcoFlow-API (quota/all) auf und gibt das *Roh*-Data-Dict zurück.
-    Nutzt nur Roh-Keys wie powGetSysGrid, powGetSysLoad, powGetPvSum, cmsBattSoc, powGetBpCms ...
+    Flacht dict/list gemÃ¤ÃŸ Doku ab:
+    - dict:   deviceInfo.id=1
+    - list:   ids[0]=1&ids[1]=2
+    - nested: params.cmdSet=11&params.id=24 ...
+    Liefert Liste (key, value) -> spÃ¤ter ASCII-sortiert.
     """
+    items = []
+    if isinstance(obj, dict):
+        for k in obj:
+            key = f"{prefix}.{k}" if prefix else k
+            items.extend(_flatten_params(obj[k], key))
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            key = f"{prefix}[{i}]"
+            items.extend(_flatten_params(v, key))
+    else:
+        items.append((prefix, "" if obj is None else str(obj)))
+    return items
+
+def _build_sign_string(params_dict, access_key, nonce, timestamp):
+    """
+    1) Body/Query-Objekt flatten + ASCII-sortieren
+    2) accessKey, nonce, timestamp anhÃ¤ngen
+    3) Ergebnis-String fÃ¼r HMAC (UTF-8)
+    """
+    kv = _flatten_params(params_dict) if params_dict else []
+    kv.sort(key=lambda kv_: kv_[0])  # ASCII-sortiert
+    base = "&".join(f"{k}={v}" for k, v in kv) if kv else ""
+    tail = f"accessKey={access_key}&nonce={nonce}&timestamp={timestamp}"
+    return (base + "&" + tail) if base else tail
+
+def _hmac_sha256_hex(secret_key, msg):
+    return hmac.new(secret_key.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
+
+def _signed_headers(access_key, secret_key, params_dict, content_type=None):
+    ts = str(int(time.time()*1000))
+    nonce = _six_digit_nonce()
+    sign_str = _build_sign_string(params_dict, access_key, nonce, ts)
+    sig = _hmac_sha256_hex(secret_key, sign_str)
+    hdr = {
+        "accessKey": access_key,
+        "nonce": nonce,
+        "timestamp": ts,
+        "sign": sig
+    }
+    if content_type:
+        hdr["Content-Type"] = content_type
+    return hdr
+
+def ecoflow_get_device_list():
     base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
-    sn   = getattr(api_key, "ECOFLOW_DEVICE_ID", "").strip()
-    ak   = getattr(api_key, "ECOFLOW_APP_KEY", "").strip()
-    sk   = getattr(api_key, "ECOFLOW_SECRET_KEY", "").strip()
-    if not sn or not ak or not sk:
-        raise RuntimeError("EcoFlow Keys/SN fehlen in api_key.py")
-
-    path = "/iot-open/sign/device/quota/all"
-    q = {"sn": sn}
-    nonce = random.randint(100000, 999999)
-    ts    = int(time.time() * 1000)
-    sign_params = dict(q, **{"accessKey": ak, "nonce": nonce, "timestamp": ts})
-    sig = _ef_sign(sign_params, sk)
-
-    headers = {"accessKey": ak, "nonce": str(nonce), "timestamp": str(ts), "sign": sig}
-    url = f"{base}{path}?{urlencode(q)}"
-    r = requests.get(url, headers=headers, timeout=12)
-    r.raise_for_status()
-    j = r.json()
-    if str(j.get("code")) != "0":
-        raise RuntimeError(f"EcoFlow quota/all Fehler: {j}")
-    data = j.get("data", {}) or {}
-    # Debug-Dump
+    path = "/iot-open/sign/device/list"
+    params = {}  # keine GET-Parameter
+    hdr = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, params, content_type=None)
+    url = f"{base}{path}"
+    r = requests.get(url, headers=hdr, timeout=12)
     try:
-        with open("/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_quota_last.json","w") as f:
-            json.dump(data, f, indent=2)
+        j = r.json()
     except Exception:
-        pass
-    # Konsolen-Log (optional)
-    print("----- EcoFlow API Response START -----")
-    print(json.dumps(data, indent=2))
-    print("----- EcoFlow API Response END -----")
-    return data
+        j = {"raw": r.text}
+    if r.status_code == 200 and str(j.get("code")) == "0":
+        return j.get("data", []) or []
+    raise RuntimeError(f"EcoFlow device/list fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
 
-# PV-Serie aus EcoFlow (konstant über Zeitraum)
-def get_pv_series(slots_dt, eco):
+def ecoflow_get_all_quota(sn):
+    base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
+    path = "/iot-open/sign/device/quota/all"
+    query = {"sn": sn}
+    hdr = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, query, content_type=None)
+    url = f"{base}{path}?{urlencode(query)}"
+    r = requests.get(url, headers=hdr, timeout=12)
     try:
-        pv = eco.get("powGetPvSum", 0.0)
-        pv_w = float(pv or 0.0)
-        return pd.Series([pv_w] * len(slots_dt))
+        j = r.json()
+    except Exception:
+        j = {"raw": r.text}
+    if r.status_code == 200 and str(j.get("code")) == "0":
+        return j.get("data", {}) or {}
+    raise RuntimeError(f"EcoFlow quota/all fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
+
+def ecoflow_status_bkw():
+    """
+    Mapping für EcoFlow Stream/PowerStream basierend auf deinen Keys.
+    - soc: cmsBattSoc (%)
+    - pv_input_w_sum: powGetPvSum (W)
+    - load_w: powGetSysLoad (W)
+    - grid_w: powGetSysGrid (W) oder gridConnectionPower (W)
+    - power_w: bevorzugt aus powGetBpCms (umgedrehtes Vorzeichen), sonst Bilanz = load - pv - grid
+               (>0 Entladen, <0 Laden)
+    - mode: kompakt aus feedGridMode + energyStrategyOperateMode.*
+    - eta_min: bei Stream meist nicht vorhanden -> None
+    Zusätzlich: Rohdaten-Dump nach ecoflow_quota_last.json.
+    """
+    sn = getattr(api_key, "ECOFLOW_DEVICE_ID", "").strip()
+    if not sn:
+        raise RuntimeError("ECOFLOW_DEVICE_ID fehlt in api_key.py")
+
+    try:
+        q = ecoflow_get_all_quota(sn)
+        # Debug-Dump
+        try:
+            with open("/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_quota_last.json", "w") as f:
+                json.dump(q, f, indent=2)
+        except Exception:
+            pass
     except Exception as e:
-        logging.error(f"PV aus EcoFlow fehlgeschlagen: {e}")
-        return pd.Series([0.0] * len(slots_dt))
+        logging.error("EcoFlow quota/all fehlgeschlagen: %s", e)
+        if os.path.exists(ECOFLOW_FALLBACK):
+            try:
+                with open(ECOFLOW_FALLBACK) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {
+            "soc": None, "power_w": None, "mode": None, "eta_min": None,
+            "pv_input_w_sum": None, "pv1_input_w": None, "pv2_input_w": None,
+            "grid_w": None, "load_w": None
+        }
+
+    def num(key, default=None):
+        v = q.get(key)
+        fv = _to_float(v)
+        return fv if fv is not None else default
+
+    # Kerngrößen
+    soc     = num("cmsBattSoc")
+    if soc is not None:
+        try: soc = int(round(soc))
+        except: pass
+
+    pv_sum  = num("powGetPvSum")
+    load_w  = num("powGetSysLoad")
+    grid_w  = num("powGetSysGrid")
+    if grid_w is None:
+        grid_w = num("gridConnectionPower")
+
+    # Batterie-Leistung
+    bp      = num("powGetBpCms")     # beobachtet: negativ bei Entladen
+    if bp is not None:
+        power_w = -bp                # Konvention: >0 Entladen, <0 Laden
+    else:
+        power_w = None
+        if (load_w is not None) and (pv_sum is not None) and (grid_w is not None):
+            power_w = (load_w - pv_sum - grid_w)
+
+    # Modus kompakt
+    feed_mode = q.get("feedGridMode")  # 0/1
+    es_self   = q.get("energyStrategyOperateMode.operateSelfPoweredOpen")
+    es_sched  = q.get("energyStrategyOperateMode.operateIntelligentScheduleModeOpen")
+    mode_parts = []
+    if feed_mode is not None:
+        try: mode_parts.append(f"Feed:{int(float(feed_mode))}")
+        except: mode_parts.append(f"Feed:{feed_mode}")
+    if es_self is not None:  mode_parts.append(f"Self:{es_self}")
+    if es_sched is not None: mode_parts.append(f"Sched:{es_sched}")
+    mode = " | ".join(map(str, mode_parts)) if mode_parts else None
+
+    return {
+        "soc": soc,
+        "power_w": power_w,
+        "mode": mode,
+        "eta_min": None,
+        "pv_input_w_sum": pv_sum,
+        "pv1_input_w": None,
+        "pv2_input_w": None,
+        "grid_w": grid_w,
+        "load_w": load_w
+    }
+
+
 
 # ---------- Drawing ----------
 def draw_dashed_line(d, x1, y1, x2, y2, dash=2, gap=2, fill=0, width=1):
@@ -234,31 +430,17 @@ def draw_dashed_line(d, x1, y1, x2, y2, dash=2, gap=2, fill=0, width=1):
         xb, yb = x1 + dx*re, y1 + dy*re
         d.line((xa, ya, xb, yb), fill=fill, width=width)
 
-def minutes_to_hhmm(m):
-    if m is None: return "-"
+# ---------- Helper ----------
+def _as_float_or_none(x):
+    if isinstance(x, (list, tuple)):
+        x = x[0] if x else None
     try:
-        m = int(m)
-        return f"{m//60:02d}:{m%60:02d} h"
-    except: return "-"
-
-def draw_battery(d, x, y, w, h, soc, arrow=None, fonts=None):
-    try:
-        soc = max(0, min(100, int(round(float(soc)))))
+        return None if x is None else float(x)
     except Exception:
-        soc = 0
-    d.rectangle((x, y, x+w, y+h), outline=0, width=2)
-    d.rectangle((x+w, y+h*0.35, x+w+6, y+h*0.65), outline=0, width=2)
-    inner_w = max(0, int((w-6) * soc/100))
-    d.rectangle((x+3, y+3, x+3+inner_w, y+h-3), fill=0)
-    if fonts: d.text((x+w+12, y+h/2-7), f"{soc}%", font=fonts['small'], fill=0)
-    if arrow == "up":
-        d.polygon([(x+w+45,y+h*0.65),(x+w+55,y+h*0.65),(x+w+50,y*h*0.40)], fill=0)
-    elif arrow == "down":
-        d.polygon([(x+w+45,y*h*0.40),(x+w+55,y*h*0.40),(x+w+50,y*h*0.65)], fill=0)
+        return None
 
 def draw_weather_box(d, x, y, w, h, fonts, sun_today, sun_tomorrow=None):
     d.rectangle((x, y, x+w, y+h), outline=0, width=2)
-    # Sonne
     cx, cy, r = x+25, y+25, 10
     d.ellipse((cx-r, cy-r, cx+r, cy+r), outline=0, width=2)
     for ang in range(0, 360, 45):
@@ -266,75 +448,98 @@ def draw_weather_box(d, x, y, w, h, fonts, sun_today, sun_tomorrow=None):
         d.line((cx+math.cos(rad)*r*1.6, cy+math.sin(rad)*r*1.6,
                 cx+math.cos(rad)*r*2.4, cy+math.sin(rad)*r*2.4), fill=0, width=2)
     d.text((x+60, y+5), "Wetter", font=fonts['bold'], fill=0)
-    try: t_val = float(sun_today or 0.0)
+    try:  t_val = float(sun_today)    if sun_today    is not None else 0.0
     except: t_val = 0.0
+    try:  m_val = float(sun_tomorrow) if sun_tomorrow is not None else None
+    except: m_val = None
     d.text((x+60, y+28), f"Sonnenstunden heute:  {t_val:.1f} h", font=fonts['small'], fill=0)
-    if sun_tomorrow is not None:
-        try: m_val = float(sun_tomorrow or 0.0)
-        except: m_val = 0.0
+    if m_val is not None:
         d.text((x+60, y+46), f"Sonnenstunden morgen: {m_val:.1f} h", font=fonts['small'], fill=0)
 
-def draw_ecoflow_box_raw(d, x, y, w, h, fonts, eco):
-    """
-    Nutzt NUR Roh-Keys:
-      SoC: cmsBattSoc (%)
-      PV:  powGetPvSum (W)
-      Netz: powGetSysGrid (W) oder gridConnectionPower (W)
-      Last: powGetSysLoad (W)
-      Leistung (Pfeil): powGetBpCms (negativ = Entladen) -> invertieren, sonst gridConnectionPower
-    """
+def minutes_to_hhmm(m):
+    if m is None:
+        return "-"
+    try:
+        m = int(m)
+        return f"{m//60:02d}:{m%60:02d} h"
+    except:
+        return "-"
+
+
+def draw_battery(d, x, y, w, h, soc, arrow=None, fonts=None):
+    soc = max(0, min(100, int(soc) if soc is not None else 0))
     d.rectangle((x, y, x+w, y+h), outline=0, width=2)
-    title_x, title_y = x+10, y+5
-    d.text((title_x, title_y), "EcoFlow Stream AC", font=fonts['bold'], fill=0)
+    d.rectangle((x+w, y+h*0.35, x+w+6, y+h*0.65), outline=0, width=2)
+    inner_w = max(0, int((w-6) * soc/100))
+    d.rectangle((x+3, y+3, x+3+inner_w, y+h-3), fill=0)
+    if fonts: d.text((x+w+12, y+h/2-7), f"{soc}%", font=fonts['small'], fill=0)
+    if arrow == "up":
+        d.polygon([(x+w+45,y+h*0.65),(x+w+55,y+h*0.65),(x+w+50,y+h*0.40)], fill=0)
+    elif arrow == "down":
+        d.polygon([(x+w+45,y+h*0.40),(x+w+55,y+h*0.40),(x+w+50,y+h*0.65)], fill=0)
 
-    def to_f(v):
-        try: return float(v)
-        except: return None
-    def fmt_w(v):
-        return f"{int(round(v))} W" if isinstance(v,(int,float)) else "-"
-
-    soc   = eco.get("cmsBattSoc")
-    pv    = to_f(eco.get("powGetPvSum"))
-    grid  = to_f(eco.get("powGetSysGrid"))
-    if grid is None:
-        grid = to_f(eco.get("gridConnectionPower"))
-    load  = to_f(eco.get("powGetSysLoad"))
-    pwr   = to_f(eco.get("powGetBpCms"))
-    if pwr is not None:
-        pwr = -pwr  # >0 Entladen, <0 Laden (Vorzeichen drehen)
-    else:
-        pwr = to_f(eco.get("gridConnectionPower"))
-
-    # Pfeil neben Titel (Pfeil 15 px weiter rechts)
+def draw_ecoflow_box(d, x, y, w, h, fonts, st):
+    d.rectangle((x, y, x + w, y + h), outline=0, width=2)
+    title = "EcoFlow Stream AC"
+    p = st.get('power_w')
     arrow = None
-    if isinstance(pwr,(int,float)):
-        if pwr < -10: arrow = "up"
-        elif pwr > 10: arrow = "down"
+    mode = (st.get('mode') or "").lower()
+
+    if "charg" in mode:
+        arrow = "up"
+    elif "discharg" in mode or "feed" in mode:
+        arrow = "down"
+    elif isinstance(p, (int, float)):
+        if p < -10:
+            arrow = "up"
+        elif p > 10:
+            arrow = "down"
+
+    # Überschrift + Pfeil
+    title_x, title_y = x + 10, y + 5
+    d.text((title_x, title_y), title, font=fonts['bold'], fill=0)
     arrow_offset = 15
     if arrow == "up":
-        d.polygon([(title_x + 150 + arrow_offset, title_y + 20),
-                   (title_x + 160 + arrow_offset, title_y + 20),
-                   (title_x + 155 + arrow_offset, title_y + 5)], fill=0)
+        d.polygon([
+            (title_x + 150 + arrow_offset, title_y + 20),
+            (title_x + 160 + arrow_offset, title_y + 20),
+            (title_x + 155 + arrow_offset, title_y + 5)
+        ], fill=0)
     elif arrow == "down":
-        d.polygon([(title_x + 150 + arrow_offset, title_y + 5),
-                   (title_x + 160 + arrow_offset, title_y + 5),
-                   (title_x + 155 + arrow_offset, title_y + 20)], fill=0)
+        d.polygon([
+            (title_x + 150 + arrow_offset, title_y + 5),
+            (title_x + 160 + arrow_offset, title_y + 5),
+            (title_x + 155 + arrow_offset, title_y + 20)
+        ], fill=0)
 
-    # Batterie (SoC)
-    batt_x, batt_y = x+10, y+28
-    draw_battery(d, batt_x, batt_y, 90, 28, soc, arrow=None, fonts=fonts)
+    # Batterie
+    batt_x, batt_y = x + 10, y + 28
+    draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=None, fonts=fonts)
 
-    # Zwei Spalten, Texte 10 px weiter rechts
+    # Hilfsfunktion
+    def fmt_w(v):
+        try:
+            return f"{int(round(float(v)))} W"
+        except:
+            return "-"
+
     text_offset = 10
-    left_x  = batt_x + 120 + text_offset
-    right_x = batt_x + 260 + text_offset
-    base_y  = batt_y - 4
-    line_h  = 16
 
-    d.text((left_x,  base_y + 0*line_h), f"Leistung: {fmt_w(pwr)}", font=fonts['small'], fill=0)
-    d.text((left_x,  base_y + 1*line_h), f"PV-Ertrag: {fmt_w(pv)}",  font=fonts['small'], fill=0)
-    d.text((right_x, base_y + 0*line_h), f"Netz: {fmt_w(grid)}",    font=fonts['small'], fill=0)
-    d.text((right_x, base_y + 1*line_h), f"Last: {fmt_w(load)}",    font=fonts['small'], fill=0)
+    # Nutzung der Originalkeys aus der EcoFlow-API
+    lines_left = [
+    f"Leistung: {fmt_w(st.get('gridConnectionPower'))}",
+    f"PV-Ertrag: {fmt_w(st.get('powGetPvSum'))}"
+    ]
+    lines_right = [
+    f"Netz: {fmt_w(st.get('powGetSysGrid'))}",
+    f"Last: {fmt_w(st.get('powGetSysLoad'))}"
+    ]
+
+    for i, t in enumerate(lines_left):
+        d.text((batt_x + 120 + text_offset, batt_y - 4 + i * 16), t, font=fonts['small'], fill=0)
+    for i, t in enumerate(lines_right):
+        d.text((batt_x + 260 + text_offset, batt_y - 4 + i * 16), t, font=fonts['small'], fill=0)
+
 
 def draw_info_box(d, info, fonts, y, width):
     x0 = 10
@@ -372,9 +577,9 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
         except: return 0
     pmax = max(vmax_power(pv_left), vmax_power(pv_right),
                vmax_power(cons_left), vmax_power(cons_right))
-    sy_pow = H/((pmax or 1)*1.5)  # etwas „tiefer“ skalieren
+    sy_pow = H/((pmax or 1)*1.2)
 
-    # Preis-Y Ticks (nur innerhalb des Chart-Bereichs)
+    # Preis-Y-Ticks (nur innerhalb)
     step = 5
     yv = math.floor(vmin/step) * step
     while yv <= vmax:
@@ -387,25 +592,25 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
         n = len(ts_list)
         if n < 2: return
         xs = [x0 + i*(PW/(n-1)) for i in range(n)]
-        # Preis-Stufenlinie
+        # Preis Stufenlinie
         for i in range(n-1):
             x1, y1 = xs[i],   Y1 - (val_list[i]   - vmin)*sy_price
             x2, y2 = xs[i+1], Y1 - (val_list[i+1] - vmin)*sy_price
             d.line((x1,y1, x2,y1), fill=0, width=2)
             d.line((x2,y1, x2,y2), fill=0, width=2)
-        # PV (gestrichelt)
+        # PV
         if pv_list is not None and n == len(pv_list):
             for i in range(n-1):
                 y1 = Y1 - pv_list.iloc[i]*sy_pow
                 y2 = Y1 - pv_list.iloc[i+1]*sy_pow
                 draw_dashed_line(d, xs[i], y1, xs[i+1], y2, dash=2, gap=2, width=1)
-        # Verbrauch (gestrichelt, längere Striche)
+        # Verbrauch
         if cons_list is not None and n == len(cons_list):
             for i in range(n-1):
                 y1 = Y1 - cons_list.iloc[i]*sy_pow
                 y2 = Y1 - cons_list.iloc[i+1]*sy_pow
                 draw_dashed_line(d, xs[i], y1, xs[i+1], y2, dash=4, gap=3, width=1)
-        # Min/Max-Labels Preis
+        # Min/Max Labels
         vmin_i, vmax_i = val_list.index(min(val_list)), val_list.index(max(val_list))
         for idx in (vmin_i, vmax_i):
             xi, yi = xs[idx], Y1 - (val_list[idx]-vmin)*sy_price
@@ -415,7 +620,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
     panel(tr, vr, pv_right, cons_right, X0+PW)
 
-    # Subtitles
+    # Subtitles unter Achse
     d.text((X0+5,    Y1+28), subtitles[0], font=fonts['bold'], fill=0)
     d.text((X0+PW+5, Y1+28), subtitles[1], font=fonts['bold'], fill=0)
 
@@ -431,27 +636,29 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     hour_ticks(tl, X0)
     hour_ticks(tr, X0+PW)
 
-    # Legende (ASCII-Striche gegen Encoding-Probleme)
-    d.text((X1-180, Y0-16), "--  PV   ----  Verbrauch", font=fonts['tiny'], fill=0)
+    # Legende Leistung
+    d.text((X1-180, Y0-16), "-  Strompreis   ----  Verbrauch", font=fonts['tiny'], fill=0)
 
-    # Minutengenauer Marker
+    # Minutengenauer Marker (horizontale Interpolation)
     if cur_price is not None:
         now = dt.datetime.now(LOCAL_TZ)
+
         def pick_panel_for_now():
             if len(tl) > 1 and tl[0] <= now <= tl[-1]:
                 return tl, X0
             if len(tr) > 1 and tr[0] <= now <= tr[-1]:
                 return tr, X0 + PW
             return None, None
-        arr, x0 = pick_panel_for_now()
+
+        arr, x0_panel = pick_panel_for_now()
         if arr is not None:
             n = len(arr)
             if n > 1:
                 t0 = arr[0]
-                i_float = (now - t0).total_seconds() / 900.0
+                i_float = (now - t0).total_seconds() / 900.0  # 900s = 15 min
                 i_float = max(0.0, min(n - 1, i_float))
                 slot_w = PW / (n - 1)
-                px = x0 + i_float * slot_w
+                px = x0_panel + i_float * slot_w
                 py = Y1 - (cur_price - vmin) * sy_price
                 r = 4
                 d.ellipse((px - r, py - r, px + r, py + r), fill=0)
@@ -463,13 +670,14 @@ def main():
     epd.init(); epd.Clear()
     w, h = epd.width, epd.height
 
-    # Daten laden (Tibber)
+    # Daten laden, robust gegen API-Ausfall
     try:
         pi = tibber_priceinfo()
         update_price_cache(pi)
     except Exception as e:
         logging.error("Nutze Cache wegen Fehler: %s", e)
         today_cache = load_cache(CACHE_TODAY) or {"data": []}
+        yesterday_cache = load_cache(CACHE_YESTERDAY) or {"data": []}
         pi = {
             'today': today_cache.get('data', []),
             'tomorrow': [],
@@ -478,6 +686,7 @@ def main():
         }
 
     info = prepare_info(pi)
+
     tomorrow = pi.get('tomorrow', [])
     if tomorrow:
         left, right = pi['today'], tomorrow
@@ -485,32 +694,29 @@ def main():
     else:
         left, right = (load_cache(CACHE_YESTERDAY) or {"data": []})['data'], pi['today']
         labels = ("Gestern", "Heute")
-
-    tl_dt, _ = expand_to_15min(left)
-    tr_dt, _ = expand_to_15min(right)
-
-    # EcoFlow Rohdaten
+    
+# EcoFlow-Status früh laden (robust) – damit eco immer definiert ist
     eco = {}
     try:
-        eco = ecoflow_status_raw()
+        eco = ecoflow_status_bkw()  # liefert dict mit u.a. pv_input_w_sum, powGetPvSum, powGetSysGrid, powGetSysLoad, power_w, cmsBattSoc
     except Exception as e:
         logging.error(f"EcoFlow Status fehlgeschlagen: {e}")
         eco = {}
 
-    # PV (aus EcoFlow)
-    pv_left   = get_pv_series(tl_dt, eco=eco)
-    pv_right  = get_pv_series(tr_dt, eco=eco)
+    tl_dt, _ = expand_to_15min(left)
+    tr_dt, _ = expand_to_15min(right)
 
-    # Tibber-Verbrauch (hochgerechnet auf 15 min)
-    hourly = []
-    try:
-        hourly = tibber_hourly_consumption(last=48)
-    except Exception as e:
-        logging.error(f"Tibber Consumption fehlgeschlagen: {e}")
+    pv_left  = get_pv_series(tl_dt, eco=eco)
+    pv_right = get_pv_series(tr_dt, eco=eco)
+
+    hourly = tibber_hourly_consumption(last=48)
     cons_left  = upsample_hourly_to_quarter(tl_dt, hourly)
     cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
     sun_today, sun_tomorrow = sunshine_hours_both(api_key.LAT, api_key.LON)
+
+    # EcoFlow: signierte BKW-Variante
+    eco = ecoflow_status_bkw()
 
     # Canvas
     img  = Image.new('1', (w, h), 255)
@@ -530,12 +736,12 @@ def main():
     top_h  = 70
     box_w  = (w - margin*3)//2
     draw_weather_box(d, margin, margin, box_w, top_h, fonts, sun_today, sun_tomorrow)
-    draw_ecoflow_box_raw(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
+    draw_ecoflow_box(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
 
     # Info-Zeile tiefer
     draw_info_box(d, info, fonts, y=top_h + margin + 6, width=w-20)
 
-    # Chart kleiner + Platz für Stunden
+    # Chart kleiner in der HÃ¶he + Platz fÃ¼r Stunden
     chart_top = top_h + margin + 40
     chart_area = (int(w*0.06), chart_top, w - int(w*0.06), h-70)
 
@@ -551,6 +757,7 @@ def main():
 
     epd.display(epd.getbuffer(img))
     epd.sleep()
+
 
 if __name__ == "__main__":
     main()
