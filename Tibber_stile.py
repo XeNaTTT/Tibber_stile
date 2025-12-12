@@ -86,6 +86,49 @@ def tibber_priceinfo():
     except Exception as e:
         raise RuntimeError(f"Tibber Antwort unerwartet: {e}, payload keys: {list(j.keys())}")
 
+
+def tibber_priceinfo_quarter_range():
+    """
+    Versucht, echte 15-Minuten-Intervalle von Tibber zu laden.
+    Bei Fehlern (z. B. wenn die API den Enum nicht kennt) wird None zurückgegeben,
+    damit der Aufrufer auf die stündlichen Daten zurückfallen kann.
+    """
+    if not getattr(api_key, "API_KEY", None) or str(api_key.API_KEY).startswith("DEIN_"):
+        raise RuntimeError("Tibber API_KEY fehlt/Platzhalter. Trage einen gültigen Token in api_key.py ein.")
+
+    hdr = {
+        "Authorization": f"Bearer {api_key.API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    def _query_with_resolution(resolution_name):
+        gql = (
+            "{ viewer { homes { currentSubscription { priceInfo { "
+            "current { total startsAt } "
+            f"range(resolution: {resolution_name}, last: 200) {{ nodes {{ total startsAt }} }} "
+            "}}}}}"
+        )
+        r = requests.post(
+            "https://api.tibber.com/v1-beta/gql",
+            json={"query": gql},
+            headers=hdr,
+            timeout=20,
+        )
+        if r.status_code >= 400:
+            logging.warning("Tibber (15m) HTTP %s: %s", r.status_code, r.text[:200])
+            r.raise_for_status()
+        j = r.json()
+        if isinstance(j, dict) and j.get("errors"):
+            raise RuntimeError(f"Tibber GraphQL Fehler (15m): {j['errors']}")
+        return j["data"]["viewer"]["homes"][0]["currentSubscription"]["priceInfo"]
+
+    for res in ("QUARTER_OF_AN_HOUR", "QUARTER_HOUR"):
+        try:
+            return _query_with_resolution(res)
+        except Exception as e:
+            logging.warning("15-Minuten-Preise mit %s fehlgeschlagen: %s", res, e)
+    return None
+
 def update_price_cache(pi):
     today = dt.date.today().isoformat()
     ct = load_cache(CACHE_TODAY)
@@ -95,6 +138,18 @@ def update_price_cache(pi):
 
 def cached_yesterday():
     return load_cache(CACHE_YESTERDAY) or {"data": []}
+
+
+def _filter_range_for_date(nodes, date_obj):
+    out = []
+    for n in nodes or []:
+        try:
+            ts = dt.datetime.fromisoformat(n["startsAt"]).astimezone(LOCAL_TZ)
+        except Exception:
+            continue
+        if ts.date() == date_obj:
+            out.append({"startsAt": n["startsAt"], "total": n["total"]})
+    return out
 
 def prepare_info(pi):
     today = pi['today']
@@ -121,6 +176,34 @@ def expand_to_15min(slots):
             ts_list.append(start + dt.timedelta(minutes=15*k))
             val_list.append(price)
     return ts_list, val_list
+
+
+def slots_to_15min(slots):
+    """
+    Nutzt echte 15-Minuten-Slots, sofern die Tibber-Antwort diese liefert.
+    Andernfalls wird wie bisher jede Stunde auf vier 15-Minuten-Segmente
+    erweitert.
+    """
+    parsed = []
+    for s in sorted(slots, key=lambda x: x.get("startsAt", "")):
+        try:
+            start = dt.datetime.fromisoformat(s["startsAt"]).astimezone(LOCAL_TZ)
+            price = s["total"] * 100
+            parsed.append((start, price))
+        except Exception:
+            continue
+
+    if len(parsed) >= 2:
+        deltas_min = [
+            (parsed[i + 1][0] - parsed[i][0]).total_seconds() / 60.0
+            for i in range(len(parsed) - 1)
+        ]
+        if min(deltas_min) <= 16:  # bereits 15-Minuten-Auflösung
+            ts_list = [p[0] for p in parsed]
+            val_list = [p[1] for p in parsed]
+            return ts_list, val_list
+
+    return expand_to_15min(slots)
 
 # ---------- DB-Serien ----------
 def series_from_db(table, column, slots_dt):
@@ -568,8 +651,8 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     W,H = X1-X0, Y1-Y0
     PW  = W/2
 
-    tl, vl = expand_to_15min(left)
-    tr, vr = expand_to_15min(right)
+    tl, vl = slots_to_15min(left)
+    tr, vr = slots_to_15min(right)
     if not (vl or vr): return
 
     allp = vl + vr
@@ -690,15 +773,34 @@ def main():
                         'total': (today_cache.get('data',[{'total':0}])[0].get('total', 0) or 0)}
         }
 
+    quarter_range = None
+    try:
+        quarter_range = tibber_priceinfo_quarter_range()
+    except Exception as e:
+        logging.error("15-Minuten-Preise konnten nicht geladen werden: %s", e)
+
     info = prepare_info(pi)
 
     tomorrow = pi.get('tomorrow', [])
     if tomorrow:
         left, right = pi['today'], tomorrow
         labels = ("Heute", "Morgen")
+        left_date = dt.date.today()
+        right_date = dt.date.today() + dt.timedelta(days=1)
     else:
         left, right = (load_cache(CACHE_YESTERDAY) or {"data": []})['data'], pi['today']
         labels = ("Gestern", "Heute")
+        left_date = dt.date.today() - dt.timedelta(days=1)
+        right_date = dt.date.today()
+
+    if quarter_range and quarter_range.get("range", {}).get("nodes"):
+        nodes = quarter_range["range"].get("nodes", [])
+        left_q = _filter_range_for_date(nodes, left_date)
+        right_q = _filter_range_for_date(nodes, right_date)
+        if left_q:
+            left = left_q
+        if right_q:
+            right = right_q
     
 # EcoFlow-Status früh laden (robust) – damit eco immer definiert ist
     eco = {}
@@ -708,8 +810,8 @@ def main():
         logging.error(f"EcoFlow Status fehlgeschlagen: {e}")
         eco = {}
 
-    tl_dt, _ = expand_to_15min(left)
-    tr_dt, _ = expand_to_15min(right)
+    tl_dt, _ = slots_to_15min(left)
+    tr_dt, _ = slots_to_15min(right)
 
     pv_left  = get_pv_series(tl_dt, eco=eco)
     pv_right = get_pv_series(tr_dt, eco=eco)
