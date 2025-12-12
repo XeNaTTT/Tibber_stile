@@ -520,19 +520,24 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     def fmt_w(v):
         try:
             return f"{int(round(float(v)))} W"
-        except:
+        except Exception:
             return "-"
 
     text_offset = 10
 
-    # Nutzung der Originalkeys aus der EcoFlow-API
+    # Klarere Zuordnung: Batterie-/Systemleistung, PV-Eingang, Netz, Haushaltslast
+    power_w = st.get('power_w') or st.get('gridConnectionPower')
+    pv_w    = st.get('pv_input_w_sum') or st.get('powGetPvSum')
+    grid_w  = st.get('grid_w') or st.get('powGetSysGrid') or st.get('gridConnectionPower')
+    load_w  = st.get('load_w') or st.get('powGetSysLoad')
+
     lines_left = [
-    f"Leistung: {fmt_w(st.get('gridConnectionPower'))}",
-    f"PV-Ertrag: {fmt_w(st.get('powGetPvSum'))}"
+        f"Leistung: {fmt_w(power_w)}",        # Batterie (+ Entladen, - Laden)
+        f"PV-Ertrag: {fmt_w(pv_w)}"           # Aktuelle PV-Einspeisung
     ]
     lines_right = [
-    f"Netz: {fmt_w(st.get('powGetSysGrid'))}",
-    f"Last: {fmt_w(st.get('powGetSysLoad'))}"
+        f"Netz: {fmt_w(grid_w)}",             # Bezug (+) / Einspeisung (-)
+        f"Last: {fmt_w(load_w)}"              # Haushaltsverbrauch
     ]
 
     for i, t in enumerate(lines_left):
