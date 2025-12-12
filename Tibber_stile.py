@@ -647,6 +647,9 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                        pv_left=None, pv_right=None,
                        cons_left=None, cons_right=None,
                        cur_dt=None, cur_price=None):
+    PRICE_MIN_CENT = 5
+    PRICE_MAX_CENT = 60
+
     X0,Y0,X1,Y1 = area
     W,H = X1-X0, Y1-Y0
     PW  = W/2
@@ -655,9 +658,12 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     tr, vr = slots_to_15min(right)
     if not (vl or vr): return
 
-    allp = vl + vr
-    vmin, vmax = min(allp)-0.5, max(allp)+0.5
+    vmin, vmax = PRICE_MIN_CENT, PRICE_MAX_CENT
     sy_price = H/(vmax - vmin if vmax>vmin else 1)
+
+    def _price_to_y(val):
+        clipped = max(vmin, min(vmax, val))
+        return Y1 - (clipped - vmin) * sy_price
 
     def vmax_power(series):
         if series is None: return 0
@@ -671,7 +677,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     step = 5
     yv = math.floor(vmin/step) * step
     while yv <= vmax:
-        yy = Y1 - (yv - vmin) * sy_price
+        yy = _price_to_y(yv)
         if Y0 < yy < Y1:
             d.text((X0-45, yy-7), f"{yv/100:.2f}", font=fonts['tiny'], fill=0)
         yv += step
@@ -682,8 +688,8 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
         xs = [x0 + i*(PW/(n-1)) for i in range(n)]
         # Preis Stufenlinie
         for i in range(n-1):
-            x1, y1 = xs[i],   Y1 - (val_list[i]   - vmin)*sy_price
-            x2, y2 = xs[i+1], Y1 - (val_list[i+1] - vmin)*sy_price
+            x1, y1 = xs[i],   _price_to_y(val_list[i])
+            x2, y2 = xs[i+1], _price_to_y(val_list[i+1])
             d.line((x1,y1, x2,y1), fill=0, width=2)
             d.line((x2,y1, x2,y2), fill=0, width=2)
         # PV
@@ -701,7 +707,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
         # Min/Max Labels
         vmin_i, vmax_i = val_list.index(min(val_list)), val_list.index(max(val_list))
         for idx in (vmin_i, vmax_i):
-            xi, yi = xs[idx], Y1 - (val_list[idx]-vmin)*sy_price
+            xi, yi = xs[idx], _price_to_y(val_list[idx])
             d.text((xi-12, yi-12), f"{val_list[idx]/100:.2f}", font=fonts['tiny'], fill=0)
 
     panel(tl, vl, pv_left,  cons_left,  X0)
@@ -747,7 +753,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                 i_float = max(0.0, min(n - 1, i_float))
                 slot_w = PW / (n - 1)
                 px = x0_panel + i_float * slot_w
-                py = Y1 - (cur_price - vmin) * sy_price
+                py = _price_to_y(cur_price)
                 r = 4
                 d.ellipse((px - r, py - r, px + r, py + r), fill=0)
                 d.text((px + r + 2, py - r - 2), f"{cur_price/100:.2f}", font=fonts['tiny'], fill=0)
