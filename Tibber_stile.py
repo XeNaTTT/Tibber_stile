@@ -89,44 +89,11 @@ def tibber_priceinfo():
 
 def tibber_priceinfo_quarter_range():
     """
-    Versucht, echte 15-Minuten-Intervalle von Tibber zu laden.
-    Bei Fehlern (z. B. wenn die API den Enum nicht kennt) wird None zurückgegeben,
-    damit der Aufrufer auf die stündlichen Daten zurückfallen kann.
+    Tibber bietet aktuell keine 15-Minuten-Preise mehr per GraphQL-Enum an.
+    Wir verzichten deshalb auf den Versuch und liefern None, sodass die
+    Aufrufer automatisch auf die stündlichen Daten zurückfallen.
     """
-    if not getattr(api_key, "API_KEY", None) or str(api_key.API_KEY).startswith("DEIN_"):
-        raise RuntimeError("Tibber API_KEY fehlt/Platzhalter. Trage einen gültigen Token in api_key.py ein.")
-
-    hdr = {
-        "Authorization": f"Bearer {api_key.API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    def _query_with_resolution(resolution_name):
-        gql = (
-            "{ viewer { homes { currentSubscription { priceInfo { "
-            "current { total startsAt } "
-            f"range(resolution: {resolution_name}, last: 200) {{ nodes {{ total startsAt }} }} "
-            "}}}}}"
-        )
-        r = requests.post(
-            "https://api.tibber.com/v1-beta/gql",
-            json={"query": gql},
-            headers=hdr,
-            timeout=20,
-        )
-        if r.status_code >= 400:
-            logging.warning("Tibber (15m) HTTP %s: %s", r.status_code, r.text[:200])
-            r.raise_for_status()
-        j = r.json()
-        if isinstance(j, dict) and j.get("errors"):
-            raise RuntimeError(f"Tibber GraphQL Fehler (15m): {j['errors']}")
-        return j["data"]["viewer"]["homes"][0]["currentSubscription"]["priceInfo"]
-
-    for res in ("QUARTER_OF_AN_HOUR", "QUARTER_HOUR"):
-        try:
-            return _query_with_resolution(res)
-        except Exception as e:
-            logging.warning("15-Minuten-Preise mit %s fehlgeschlagen: %s", res, e)
+    logging.info("15-Minuten-Preise werden übersprungen (API-Enum nicht verfügbar)")
     return None
 
 def update_price_cache(pi):
@@ -423,9 +390,87 @@ def ecoflow_get_all_quota(sn):
         j = r.json()
     except Exception:
         j = {"raw": r.text}
+
     if r.status_code == 200 and str(j.get("code")) == "0":
         return j.get("data", {}) or {}
-    raise RuntimeError(f"EcoFlow quota/all fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
+
+    # Einige BKW/Stream-Geräte liefern die Daten nur über /device/quota,
+    # deshalb probieren wir dieses Fallback automatisch.
+    alt_path = "/iot-open/sign/device/quota"
+    alt_url = f"{base}{alt_path}?{urlencode(query)}"
+    r_alt = requests.get(alt_url, headers=hdr, timeout=12)
+    try:
+        j_alt = r_alt.json()
+    except Exception:
+        j_alt = {"raw": r_alt.text}
+    if r_alt.status_code == 200 and str(j_alt.get("code")) == "0":
+        return j_alt.get("data", {}) or {}
+
+    raise RuntimeError(
+        "EcoFlow quota fehlgeschlagen: primary %s resp=%s | fallback %s resp=%s" % (
+            f"HTTP {r.status_code}", str(j)[:200], f"HTTP {r_alt.status_code}", str(j_alt)[:200]
+        )
+    )
+
+
+def ecoflow_pv_history(sn):
+    """
+    Holt die heutige PV-Verlaufsreihe (15-min/5-min) direkt vom EcoFlow BKW.
+    Laut BKW-Doku liefert /iot-open/sign/device/quota/power eine Zeitreihe mit
+    PV-Leistungswerten. Wir parsen flexibel, um unterschiedliche Feldnamen
+    ("pvPower", "power", "value") und Timestamps (Sek./ms) zu unterstützen.
+    """
+    base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
+    path = "/iot-open/sign/device/quota/power"
+    query = {"sn": sn}
+    hdr = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, query, content_type=None)
+    url = f"{base}{path}?{urlencode(query)}"
+    r = requests.get(url, headers=hdr, timeout=12)
+    try:
+        j = r.json()
+    except Exception:
+        j = {"raw": r.text}
+
+    if not (r.status_code == 200 and str(j.get("code")) == "0"):
+        raise RuntimeError(f"PV history fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
+
+    data = j.get("data") or []
+    points = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        ts_raw = entry.get("timestamp") or entry.get("time") or entry.get("ts")
+        if ts_raw is None:
+            continue
+        try:
+            ts_raw = int(ts_raw)
+            if ts_raw > 1e12:  # ms
+                ts_dt = dt.datetime.fromtimestamp(ts_raw / 1000.0, tz=dt.timezone.utc)
+            else:
+                ts_dt = dt.datetime.fromtimestamp(ts_raw, tz=dt.timezone.utc)
+            ts_dt = ts_dt.astimezone(LOCAL_TZ)
+        except Exception:
+            continue
+
+        power = (
+            _to_float(entry.get("pvPower"))
+            or _to_float(entry.get("power"))
+            or _to_float(entry.get("value"))
+            or _to_float(entry.get("pv"))
+        )
+        if power is None:
+            continue
+        points.append((ts_dt, float(power)))
+
+    if not points:
+        raise RuntimeError("PV history leer")
+
+    points.sort(key=lambda p: p[0])
+    df = pd.DataFrame(points, columns=["ts", "pv_w"])
+    df.set_index("ts", inplace=True)
+    # Die API liefert typischerweise 5-Minuten-Slots. Wir glätten auf 15T und füllen.
+    df = df.resample("15T").mean().ffill()
+    return df["pv_w"]
 
 def ecoflow_status_bkw():
     """
