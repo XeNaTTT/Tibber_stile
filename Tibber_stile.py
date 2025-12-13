@@ -173,15 +173,28 @@ def slots_to_15min(slots):
     return expand_to_15min(slots)
 
 # ---------- DB-Serien ----------
-def series_from_db(table, column, slots_dt):
+def series_from_db(table, column, slots_dt, max_age_hours=48):
     conn = sqlite3.connect(DB_FILE)
     try:
         df = pd.read_sql_query(f"SELECT ts, {column} FROM {table}", conn)
     except Exception:
-        conn.close(); return pd.Series([0.0]*len(slots_dt))
+        conn.close(); return None
     conn.close()
+
+    if df.empty:
+        return None
+
     df['ts'] = pd.to_datetime(df['ts'], unit='s', utc=True).dt.tz_convert(LOCAL_TZ)
     df.set_index('ts', inplace=True)
+    df.sort_index(inplace=True)
+
+    if max_age_hours is not None:
+        newest = df.index.max()
+        if newest is None:
+            return None
+        if newest < dt.datetime.now(tz=LOCAL_TZ) - dt.timedelta(hours=max_age_hours):
+            return None
+
     df = df.resample('15T').mean().ffill().fillna(0)
     out = []
     for t in slots_dt:
@@ -199,6 +212,8 @@ def _pv_series_from_db(slots_dt):
     ]
     for table, col in candidates:
         s = series_from_db(table, col, slots_dt)
+        if s is None:
+            continue
         try:
             if len(s) and s.max() > 0:
                 return s
