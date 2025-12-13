@@ -218,30 +218,9 @@ def get_pv_series(slots_dt, eco=None):
             logging.info("Nutze historische PV-Daten aus der lokalen DB")
             return from_db
 
-        # Versuche zuerst die offizielle PV-Verlaufs-API des Microinverters.
-        sn_micro = getattr(api_key, "ECOFLOW_MIKRO_ID", "").strip()
-        if sn_micro:
-            try:
-                pv_hist = ecoflow_pv_history(sn_micro)
-                series = []
-                for t in slots_dt:
-                    try:
-                        v = pv_hist.asof(t)
-                    except Exception:
-                        v = None
-                    series.append(float(0.0 if v is None or pd.isna(v) else v))
-                logging.info("Nutze PV-Historie aus EcoFlow (Microinverter)")
-                return pd.Series(series)
-            except Exception as e:
-                logging.warning(f"PV-Historie von EcoFlow fehlgeschlagen: {e}")
-
         if eco is None:
             eco = ecoflow_status_bkw()
-        pv_watt = (
-            eco.get("pv_input_w_sum")
-            or eco.get("pv_w")
-            or eco.get("pv_power_w")
-        )
+        pv_watt = eco.get("pv_input_w_sum") or eco.get("pv_w")
         pv_watt = float(pv_watt or 0.0)
         logging.info(f"EcoFlow PV aktuell: {pv_watt} W")
         return pd.Series([pv_watt] * len(slots_dt))
@@ -549,54 +528,11 @@ def ecoflow_status_bkw():
         try: soc = int(round(soc))
         except: pass
 
-    def _detect_pv_power(src):
-        # bekannte Schlüssel aus Dokumentation und beobachteten Antworten
-        known_keys = [
-            "powGetPvSum",
-            "powGetPv1InputW",
-            "powGetPv2InputW",
-            "pvPower",
-            "pvInput",
-            "pvInputW",
-            "pvPowerIn",
-            "powerPv",
-            "invInputPower",
-            "inv_input_power",
-            "microInvInputPower",
-        ]
-        for k in known_keys:
-            v = num(src, k, default=None)
-            if v is None:
-                continue
-            if k in ("powGetPv1InputW", "powGetPv2InputW"):
-                # wenn nur einer der Strings gefunden wird, beide addieren
-                v_total = num(src, "powGetPv1InputW", default=0.0) + num(src, "powGetPv2InputW", default=0.0)
-                if v_total != 0.0:
-                    return v_total
-            return v
-
-        # generischer Fallback: nimm ersten numerischen Key mit "pv" und Power-Bezug
-        candidates = []
-        for key, val in (src or {}).items():
-            if not isinstance(key, str):
-                continue
-            lower = key.lower()
-            if "pv" not in lower:
-                continue
-            if not any(tag in lower for tag in ("power", "input", "w")):
-                continue
-            v = _to_float(val)
-            if v is None:
-                continue
-            candidates.append((key, v))
-        if candidates:
-            # höchster Wert zuerst, um summierte PV-Leistung zu bevorzugen
-            candidates.sort(key=lambda kv: kv[1], reverse=True)
-            logging.info(f"EcoFlow PV Power-Key automatisch gewählt: {candidates[0][0]}")
-            return candidates[0][1]
-        return None
-
-    pv_sum  = _detect_pv_power(pv_src)
+    pv_sum  = num(pv_src, "powGetPvSum")
+    if pv_sum is None:
+        pv_sum = num(pv_src, "powGetPv1InputW", default=None)
+        if pv_sum is not None:
+            pv_sum += num(pv_src, "powGetPv2InputW", default=0.0)
     load_w  = num(q_main, "powGetSysLoad")
     grid_w  = num(q_main, "powGetSysGrid")
     if grid_w is None:
