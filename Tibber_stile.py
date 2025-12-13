@@ -89,44 +89,11 @@ def tibber_priceinfo():
 
 def tibber_priceinfo_quarter_range():
     """
-    Versucht, echte 15-Minuten-Intervalle von Tibber zu laden.
-    Bei Fehlern (z. B. wenn die API den Enum nicht kennt) wird None zurückgegeben,
-    damit der Aufrufer auf die stündlichen Daten zurückfallen kann.
+    Tibber bietet aktuell keine 15-Minuten-Preise mehr per GraphQL-Enum an.
+    Wir verzichten deshalb auf den Versuch und liefern None, sodass die
+    Aufrufer automatisch auf die stündlichen Daten zurückfallen.
     """
-    if not getattr(api_key, "API_KEY", None) or str(api_key.API_KEY).startswith("DEIN_"):
-        raise RuntimeError("Tibber API_KEY fehlt/Platzhalter. Trage einen gültigen Token in api_key.py ein.")
-
-    hdr = {
-        "Authorization": f"Bearer {api_key.API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    def _query_with_resolution(resolution_name):
-        gql = (
-            "{ viewer { homes { currentSubscription { priceInfo { "
-            "current { total startsAt } "
-            f"range(resolution: {resolution_name}, last: 200) {{ nodes {{ total startsAt }} }} "
-            "}}}}}"
-        )
-        r = requests.post(
-            "https://api.tibber.com/v1-beta/gql",
-            json={"query": gql},
-            headers=hdr,
-            timeout=20,
-        )
-        if r.status_code >= 400:
-            logging.warning("Tibber (15m) HTTP %s: %s", r.status_code, r.text[:200])
-            r.raise_for_status()
-        j = r.json()
-        if isinstance(j, dict) and j.get("errors"):
-            raise RuntimeError(f"Tibber GraphQL Fehler (15m): {j['errors']}")
-        return j["data"]["viewer"]["homes"][0]["currentSubscription"]["priceInfo"]
-
-    for res in ("QUARTER_OF_AN_HOUR", "QUARTER_HOUR"):
-        try:
-            return _query_with_resolution(res)
-        except Exception as e:
-            logging.warning("15-Minuten-Preise mit %s fehlgeschlagen: %s", res, e)
+    logging.info("15-Minuten-Preise werden übersprungen (API-Enum nicht verfügbar)")
     return None
 
 def update_price_cache(pi):
@@ -222,20 +189,59 @@ def series_from_db(table, column, slots_dt):
         out.append(float(0.0 if pd.isna(v) else v))
     return pd.Series(out)
 
+def _pv_series_from_db(slots_dt):
+    """Versucht historische PV-Daten aus bekannten Tabellen/Spalten zu lesen."""
+    candidates = [
+        ("pv_log", "pv_w"),
+        ("pv_log", "pv_power"),
+        ("pv_data", "pv_w"),
+        ("pv_data", "pv_power"),
+    ]
+    for table, col in candidates:
+        s = series_from_db(table, col, slots_dt)
+        try:
+            if len(s) and s.max() > 0:
+                return s
+        except Exception:
+            continue
+    return None
+
+
 def get_pv_series(slots_dt, eco=None):
     """
-    Holt die aktuelle PV-Leistung aus EcoFlow (powGetPvSum) und zeichnet eine
-    konstante Linie über den gezeigten Zeitraum.
-    Nutzt, wenn vorhanden, das bereits ermittelte 'eco'-Dict aus main().
+    Holt historische PV-Daten aus der lokalen DB (falls vorhanden) und fällt
+    andernfalls auf die aktuelle EcoFlow-PV-Leistung zurück.
     """
     try:
+        from_db = _pv_series_from_db(slots_dt)
+        if from_db is not None:
+            logging.info("Nutze historische PV-Daten aus der lokalen DB")
+            return from_db
+
+        # Versuche zuerst die offizielle PV-Verlaufs-API des Microinverters.
+        sn_micro = getattr(api_key, "ECOFLOW_MIKRO_ID", "").strip()
+        if sn_micro:
+            try:
+                pv_hist = ecoflow_pv_history(sn_micro)
+                series = []
+                for t in slots_dt:
+                    try:
+                        v = pv_hist.asof(t)
+                    except Exception:
+                        v = None
+                    series.append(float(0.0 if v is None or pd.isna(v) else v))
+                logging.info("Nutze PV-Historie aus EcoFlow (Microinverter)")
+                return pd.Series(series)
+            except Exception as e:
+                logging.warning(f"PV-Historie von EcoFlow fehlgeschlagen: {e}")
+
         if eco is None:
             eco = ecoflow_status_bkw()
-        # bevorzugter Key aus unserem Mapper:
-        pv_watt = eco.get("pv_input_w_sum")
-        if pv_watt is None:
-            # Fallback: manche Mapper/Antw. liefern 'pv_w'
-            pv_watt = eco.get("pv_w")
+        pv_watt = (
+            eco.get("pv_input_w_sum")
+            or eco.get("pv_w")
+            or eco.get("pv_power_w")
+        )
         pv_watt = float(pv_watt or 0.0)
         logging.info(f"EcoFlow PV aktuell: {pv_watt} W")
         return pd.Series([pv_watt] * len(slots_dt))
@@ -405,9 +411,87 @@ def ecoflow_get_all_quota(sn):
         j = r.json()
     except Exception:
         j = {"raw": r.text}
+
     if r.status_code == 200 and str(j.get("code")) == "0":
         return j.get("data", {}) or {}
-    raise RuntimeError(f"EcoFlow quota/all fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
+
+    # Einige BKW/Stream-Geräte liefern die Daten nur über /device/quota,
+    # deshalb probieren wir dieses Fallback automatisch.
+    alt_path = "/iot-open/sign/device/quota"
+    alt_url = f"{base}{alt_path}?{urlencode(query)}"
+    r_alt = requests.get(alt_url, headers=hdr, timeout=12)
+    try:
+        j_alt = r_alt.json()
+    except Exception:
+        j_alt = {"raw": r_alt.text}
+    if r_alt.status_code == 200 and str(j_alt.get("code")) == "0":
+        return j_alt.get("data", {}) or {}
+
+    raise RuntimeError(
+        "EcoFlow quota fehlgeschlagen: primary %s resp=%s | fallback %s resp=%s" % (
+            f"HTTP {r.status_code}", str(j)[:200], f"HTTP {r_alt.status_code}", str(j_alt)[:200]
+        )
+    )
+
+
+def ecoflow_pv_history(sn):
+    """
+    Holt die heutige PV-Verlaufsreihe (15-min/5-min) direkt vom EcoFlow BKW.
+    Laut BKW-Doku liefert /iot-open/sign/device/quota/power eine Zeitreihe mit
+    PV-Leistungswerten. Wir parsen flexibel, um unterschiedliche Feldnamen
+    ("pvPower", "power", "value") und Timestamps (Sek./ms) zu unterstützen.
+    """
+    base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
+    path = "/iot-open/sign/device/quota/power"
+    query = {"sn": sn}
+    hdr = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, query, content_type=None)
+    url = f"{base}{path}?{urlencode(query)}"
+    r = requests.get(url, headers=hdr, timeout=12)
+    try:
+        j = r.json()
+    except Exception:
+        j = {"raw": r.text}
+
+    if not (r.status_code == 200 and str(j.get("code")) == "0"):
+        raise RuntimeError(f"PV history fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
+
+    data = j.get("data") or []
+    points = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        ts_raw = entry.get("timestamp") or entry.get("time") or entry.get("ts")
+        if ts_raw is None:
+            continue
+        try:
+            ts_raw = int(ts_raw)
+            if ts_raw > 1e12:  # ms
+                ts_dt = dt.datetime.fromtimestamp(ts_raw / 1000.0, tz=dt.timezone.utc)
+            else:
+                ts_dt = dt.datetime.fromtimestamp(ts_raw, tz=dt.timezone.utc)
+            ts_dt = ts_dt.astimezone(LOCAL_TZ)
+        except Exception:
+            continue
+
+        power = (
+            _to_float(entry.get("pvPower"))
+            or _to_float(entry.get("power"))
+            or _to_float(entry.get("value"))
+            or _to_float(entry.get("pv"))
+        )
+        if power is None:
+            continue
+        points.append((ts_dt, float(power)))
+
+    if not points:
+        raise RuntimeError("PV history leer")
+
+    points.sort(key=lambda p: p[0])
+    df = pd.DataFrame(points, columns=["ts", "pv_w"])
+    df.set_index("ts", inplace=True)
+    # Die API liefert typischerweise 5-Minuten-Slots. Wir glätten auf 15T und füllen.
+    df = df.resample("15T").mean().ffill()
+    return df["pv_w"]
 
 def ecoflow_status_bkw():
     """
@@ -422,18 +506,22 @@ def ecoflow_status_bkw():
     - eta_min: bei Stream meist nicht vorhanden -> None
     Zusätzlich: Rohdaten-Dump nach ecoflow_quota_last.json.
     """
-    sn = getattr(api_key, "ECOFLOW_DEVICE_ID", "").strip()
-    if not sn:
-        raise RuntimeError("ECOFLOW_DEVICE_ID fehlt in api_key.py")
+    sn_main = getattr(api_key, "ECOFLOW_DEVICE_ID", "").strip()
+    sn_micro = getattr(api_key, "ECOFLOW_MIKRO_ID", "").strip()
+    if not sn_main and not sn_micro:
+        raise RuntimeError("ECOFLOW_DEVICE_ID oder ECOFLOW_MIKRO_ID fehlt in api_key.py")
 
+    q_main, q_pv = {}, {}
     try:
-        q = ecoflow_get_all_quota(sn)
-        # Debug-Dump
-        try:
-            with open("/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_quota_last.json", "w") as f:
-                json.dump(q, f, indent=2)
-        except Exception:
-            pass
+        if sn_main:
+            q_main = ecoflow_get_all_quota(sn_main)
+            try:
+                with open("/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_quota_last.json", "w") as f:
+                    json.dump(q_main, f, indent=2)
+            except Exception:
+                pass
+        if sn_micro and sn_micro != sn_main:
+            q_pv = ecoflow_get_all_quota(sn_micro)
     except Exception as e:
         logging.error("EcoFlow quota/all fehlgeschlagen: %s", e)
         if os.path.exists(ECOFLOW_FALLBACK):
@@ -448,25 +536,74 @@ def ecoflow_status_bkw():
             "grid_w": None, "load_w": None
         }
 
-    def num(key, default=None):
-        v = q.get(key)
+    def num(src, key, default=None):
+        v = src.get(key) if src else None
         fv = _to_float(v)
         return fv if fv is not None else default
 
+    pv_src = q_pv or q_main
+
     # Kerngrößen
-    soc     = num("cmsBattSoc")
+    soc     = num(q_main, "cmsBattSoc")
     if soc is not None:
         try: soc = int(round(soc))
         except: pass
 
-    pv_sum  = num("powGetPvSum")
-    load_w  = num("powGetSysLoad")
-    grid_w  = num("powGetSysGrid")
+    def _detect_pv_power(src):
+        # bekannte Schlüssel aus Dokumentation und beobachteten Antworten
+        known_keys = [
+            "powGetPvSum",
+            "powGetPv1InputW",
+            "powGetPv2InputW",
+            "pvPower",
+            "pvInput",
+            "pvInputW",
+            "pvPowerIn",
+            "powerPv",
+            "invInputPower",
+            "inv_input_power",
+            "microInvInputPower",
+        ]
+        for k in known_keys:
+            v = num(src, k, default=None)
+            if v is None:
+                continue
+            if k in ("powGetPv1InputW", "powGetPv2InputW"):
+                # wenn nur einer der Strings gefunden wird, beide addieren
+                v_total = num(src, "powGetPv1InputW", default=0.0) + num(src, "powGetPv2InputW", default=0.0)
+                if v_total != 0.0:
+                    return v_total
+            return v
+
+        # generischer Fallback: nimm ersten numerischen Key mit "pv" und Power-Bezug
+        candidates = []
+        for key, val in (src or {}).items():
+            if not isinstance(key, str):
+                continue
+            lower = key.lower()
+            if "pv" not in lower:
+                continue
+            if not any(tag in lower for tag in ("power", "input", "w")):
+                continue
+            v = _to_float(val)
+            if v is None:
+                continue
+            candidates.append((key, v))
+        if candidates:
+            # höchster Wert zuerst, um summierte PV-Leistung zu bevorzugen
+            candidates.sort(key=lambda kv: kv[1], reverse=True)
+            logging.info(f"EcoFlow PV Power-Key automatisch gewählt: {candidates[0][0]}")
+            return candidates[0][1]
+        return None
+
+    pv_sum  = _detect_pv_power(pv_src)
+    load_w  = num(q_main, "powGetSysLoad")
+    grid_w  = num(q_main, "powGetSysGrid")
     if grid_w is None:
-        grid_w = num("gridConnectionPower")
+        grid_w = num(q_main, "gridConnectionPower")
 
     # Batterie-Leistung
-    bp      = num("powGetBpCms")     # beobachtet: negativ bei Entladen
+    bp      = num(q_main, "powGetBpCms")     # beobachtet: negativ bei Entladen
     if bp is not None:
         power_w = -bp                # Konvention: >0 Entladen, <0 Laden
     else:
@@ -475,9 +612,9 @@ def ecoflow_status_bkw():
             power_w = (load_w - pv_sum - grid_w)
 
     # Modus kompakt
-    feed_mode = q.get("feedGridMode")  # 0/1
-    es_self   = q.get("energyStrategyOperateMode.operateSelfPoweredOpen")
-    es_sched  = q.get("energyStrategyOperateMode.operateIntelligentScheduleModeOpen")
+    feed_mode = q_main.get("feedGridMode")  # 0/1
+    es_self   = q_main.get("energyStrategyOperateMode.operateSelfPoweredOpen")
+    es_sched  = q_main.get("energyStrategyOperateMode.operateIntelligentScheduleModeOpen")
     mode_parts = []
     if feed_mode is not None:
         try: mode_parts.append(f"Feed:{int(float(feed_mode))}")
@@ -556,44 +693,14 @@ def draw_battery(d, x, y, w, h, soc, arrow=None, fonts=None):
     inner_w = max(0, int((w-6) * soc/100))
     d.rectangle((x+3, y+3, x+3+inner_w, y+h-3), fill=0)
     if fonts: d.text((x+w+12, y+h/2-7), f"{soc}%", font=fonts['small'], fill=0)
-    if arrow == "up":
-        d.polygon([(x+w+45,y+h*0.65),(x+w+55,y+h*0.65),(x+w+50,y+h*0.40)], fill=0)
-    elif arrow == "down":
-        d.polygon([(x+w+45,y+h*0.40),(x+w+55,y+h*0.40),(x+w+50,y+h*0.65)], fill=0)
+    # Der frühere Lade-/Entladepfeil wird nicht mehr gezeichnet, da die
+    # Richtung aus den Rohdaten nicht zuverlässig ermittelt werden konnte.
 
 def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     d.rectangle((x, y, x + w, y + h), outline=0, width=2)
     title = "EcoFlow Stream AC"
-    p = st.get('power_w')
-    arrow = None
-    mode = (st.get('mode') or "").lower()
-
-    if "charg" in mode:
-        arrow = "up"
-    elif "discharg" in mode or "feed" in mode:
-        arrow = "down"
-    elif isinstance(p, (int, float)):
-        if p < -10:
-            arrow = "up"
-        elif p > 10:
-            arrow = "down"
-
-    # Überschrift + Pfeil
     title_x, title_y = x + 10, y + 5
     d.text((title_x, title_y), title, font=fonts['bold'], fill=0)
-    arrow_offset = 15
-    if arrow == "up":
-        d.polygon([
-            (title_x + 150 + arrow_offset, title_y + 20),
-            (title_x + 160 + arrow_offset, title_y + 20),
-            (title_x + 155 + arrow_offset, title_y + 5)
-        ], fill=0)
-    elif arrow == "down":
-        d.polygon([
-            (title_x + 150 + arrow_offset, title_y + 5),
-            (title_x + 160 + arrow_offset, title_y + 5),
-            (title_x + 155 + arrow_offset, title_y + 20)
-        ], fill=0)
 
     # Batterie
     batt_x, batt_y = x + 10, y + 28
@@ -692,12 +799,12 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
             x2, y2 = xs[i+1], _price_to_y(val_list[i+1])
             d.line((x1,y1, x2,y1), fill=0, width=2)
             d.line((x2,y1, x2,y2), fill=0, width=2)
-        # PV
+        # PV (historische Linie)
         if pv_list is not None and n == len(pv_list):
             for i in range(n-1):
                 y1 = Y1 - pv_list.iloc[i]*sy_pow
                 y2 = Y1 - pv_list.iloc[i+1]*sy_pow
-                draw_dashed_line(d, xs[i], y1, xs[i+1], y2, dash=2, gap=2, width=1)
+                d.line((xs[i], y1, xs[i+1], y2), fill=0, width=1)
         # Verbrauch
         if cons_list is not None and n == len(cons_list):
             for i in range(n-1):
