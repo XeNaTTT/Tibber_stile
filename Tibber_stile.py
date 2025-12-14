@@ -593,6 +593,68 @@ def ecoflow_get_quota_selected(sn, quotas: list[str]) -> dict:
     raise RuntimeError(f"EcoFlow selected quota fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
 
 
+def ecoflow_get_quota_selected_get(sn, quotas: list[str]) -> dict:
+    base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
+    path = "/iot-open/sign/device/quota"
+    params_dict = {
+        "sn": sn,
+        "params": {
+            "quotas": quotas,
+        },
+    }
+    hdr = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, params_dict, content_type=None)
+    query_pairs = sorted(_flatten_params(params_dict), key=lambda kv: kv[0])
+    url = f"{base}{path}?{urlencode(query_pairs)}"
+    r = requests.get(url, headers=hdr, timeout=12)
+    try:
+        j = r.json()
+    except Exception:
+        j = {"raw": r.text}
+
+    data = j.get("data") if isinstance(j, dict) else None
+    data_type = type(data).__name__
+    try:
+        data_len = len(data) if isinstance(data, (dict, list)) else 0
+    except Exception:
+        data_len = 0
+    logging.info(
+        "EcoFlow RAW quota(GET) sn=%s http=%s code=%s msg=%s data_type=%s data_len=%s",
+        sn,
+        r.status_code,
+        j.get("code") if isinstance(j, dict) else None,
+        j.get("message") if isinstance(j, dict) else None,
+        data_type,
+        data_len,
+    )
+
+    if r.status_code == 200 and str(j.get("code")) == "0":
+        try:
+            if data is None:
+                logging.info("EcoFlow selected quota raw data=None")
+            elif isinstance(data, dict):
+                compact_parts = []
+                for dk, dv in data.items():
+                    try:
+                        if isinstance(dv, dict):
+                            compact_parts.append(f"{dk}=<dict len={len(dv)}>")
+                        elif isinstance(dv, list):
+                            compact_parts.append(f"{dk}=<list len={len(dv)}>")
+                        else:
+                            compact_parts.append(f"{dk}={dv}")
+                    except Exception:
+                        continue
+                logging.info("EcoFlow selected quota raw data: %s", "; ".join(compact_parts))
+            else:
+                logging.info("EcoFlow selected quota raw data: %s", data)
+        except Exception:
+            try:
+                logging.info("EcoFlow selected quota raw data logging failed")
+            except Exception:
+                pass
+        return data or {}
+    raise RuntimeError(f"EcoFlow selected quota(GET) fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
+
+
 def ecoflow_pv_history(sn):
     """
     Holt die heutige PV-Verlaufsreihe (15-min/5-min) direkt vom EcoFlow BKW.
@@ -820,6 +882,18 @@ def ecoflow_status_bkw():
 
     if sn_micro:
         try:
+            try:
+                quotas_micro = [
+                    "20_1.permanentWatts",
+                    "20_1.pv1InputWatts", "20_1.pv2InputWatts",
+                    "20_1.invOutputWatts",
+                    "20_1.feedInWatts",
+                    "20_1.loadWatts",
+                    "20_1.gridWatts",
+                ]
+                ecoflow_get_quota_selected_get(sn_micro, quotas_micro)
+            except Exception as e:
+                logging.info("EcoFlow selected quota GET-Test fehlgeschlagen: %s", e)
             selected_quota_keys = [
                 "20_1.pv1InputWatts",
                 "20_1.pv2InputWatts",
