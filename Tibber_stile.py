@@ -7,6 +7,10 @@ import pandas as pd, numpy as np
 from urllib.parse import urlencode
 import re
 
+ECO_DEBUG = str(os.getenv("ECO_DEBUG", "")).lower() in {"1", "true", "yes", "on"}
+DUMP_DIR = "/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_dump"
+PV_KEY_PATTERN = re.compile(r"(pv|solar|yield|gen|power|input|watt|energy)", re.IGNORECASE)
+
 # Zeitzone
 try:
     from zoneinfo import ZoneInfo
@@ -54,6 +58,41 @@ def safe_get(d, *path, default=None):
         if d is None: return default
         d = d.get(k)
     return d if d is not None else default
+
+
+def _dump_json(name, obj):
+    if not ECO_DEBUG:
+        return
+    try:
+        os.makedirs(DUMP_DIR, exist_ok=True)
+        ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        fn = os.path.join(DUMP_DIR, f"{name}_{ts}.json")
+        with open(fn, "w") as f:
+            json.dump(obj, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        try:
+            logging.debug("EcoFlow debug dump skipped: %s", e)
+        except Exception:
+            pass
+
+
+def _pv_candidates(d):
+    if not isinstance(d, dict):
+        return []
+    out = []
+    for k, v in d.items():
+        try:
+            if not PV_KEY_PATTERN.search(str(k)):
+                continue
+            example = v
+            if isinstance(v, (list, tuple)) and v:
+                example = v[0]
+            elif isinstance(v, dict) and v:
+                example = next(iter(v.values()))
+            out.append((k, type(v).__name__, example))
+        except Exception:
+            continue
+    return out
 
 # ---------- Tibber ----------
 def tibber_priceinfo():
@@ -539,6 +578,34 @@ def ecoflow_status_bkw():
             "pv_input_w_sum": None, "pv1_input_w": None, "pv2_input_w": None,
             "grid_w": None, "load_w": None
         }
+
+    if ECO_DEBUG:
+        try:
+            if q_main:
+                _dump_json("ecoflow_main", q_main)
+            if q_pv:
+                _dump_json("ecoflow_micro", q_pv)
+
+            main_candidates = _pv_candidates(q_main)
+            logging.info("MAIN PV CANDIDATES: %s", main_candidates)
+
+            if q_pv:
+                micro_candidates = _pv_candidates(q_pv)
+                logging.info("MICRO PV CANDIDATES: %s", micro_candidates)
+
+                main_keys = set(q_main.keys()) if isinstance(q_main, dict) else set()
+                micro_keys = set(q_pv.keys()) if isinstance(q_pv, dict) else set()
+                only_micro = sorted(micro_keys - main_keys)
+                only_main = sorted(main_keys - micro_keys)
+                logging.info("ONLY MICRO KEYS: %s", only_micro)
+                logging.info("ONLY MAIN KEYS: %s", only_main)
+            else:
+                logging.info("MICRO PV CANDIDATES: %s", [])
+        except Exception as e:
+            try:
+                logging.info("EcoFlow debug logging skipped: %s", e)
+            except Exception:
+                pass
 
     def num(src, key, default=None):
         v = src.get(key) if src else None
