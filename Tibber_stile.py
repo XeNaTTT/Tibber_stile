@@ -456,6 +456,34 @@ def ecoflow_get_device_list():
         return j.get("data", []) or []
     raise RuntimeError(f"EcoFlow device/list fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
 
+def ecoflow_get_main_sn(sn_any):
+    base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
+    path = "/iot-open/sign/device/system/main/sn"
+    query = {"sn": sn_any}
+    hdr = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, query, content_type=None)
+    url = f"{base}{path}?{urlencode(query)}"
+    r = requests.get(url, headers=hdr, timeout=12)
+    try:
+        j = r.json()
+    except Exception:
+        j = {"raw": r.text}
+
+    main_sn = None
+    if r.status_code == 200 and str(j.get("code")) == "0":
+        data = j.get("data") if isinstance(j, dict) else None
+        if isinstance(data, dict):
+            main_sn = data.get("sn") or data.get("mainSn") or data.get("deviceSn")
+        elif isinstance(data, str):
+            main_sn = data
+    logging.info(
+        "EcoFlow main-sn resolve: input=%s -> main=%s (http=%s, code=%s)",
+        sn_any,
+        main_sn,
+        r.status_code,
+        j.get("code") if isinstance(j, dict) else None,
+    )
+    return main_sn
+
 def ecoflow_get_all_quota(sn, with_status=False):
     base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
     path = "/iot-open/sign/device/quota/all"
@@ -655,6 +683,44 @@ def ecoflow_get_quota_selected_get(sn, quotas: list[str]) -> dict:
     raise RuntimeError(f"EcoFlow selected quota(GET) fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
 
 
+def ecoflow_quota_data(sn_main, beginTime_utc, endTime_utc, code):
+    base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
+    path = "/iot-open/sign/device/quota/data"
+    query = {"sn": sn_main}
+    body = {
+        "sn": sn_main,
+        "params": {
+            "beginTime": beginTime_utc,
+            "endTime": endTime_utc,
+            "code": code,
+        },
+    }
+    hdr = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, body, content_type="application/json")
+    url = f"{base}{path}?{urlencode(query)}"
+    r = requests.post(url, headers=hdr, json=body, timeout=15)
+    try:
+        j = r.json()
+    except Exception:
+        j = {"raw": r.text}
+
+    data = j.get("data") if isinstance(j, dict) else None
+    count = len(data) if isinstance(data, list) else 0
+    unit = None
+    try:
+        if data and isinstance(data[0], dict):
+            unit = data[0].get("unit")
+    except Exception:
+        pass
+    logging.info(
+        "EcoFlow quota/data code=%s count=%s unit=%s",
+        code,
+        count,
+        unit,
+    )
+    if r.status_code == 200 and str(j.get("code")) == "0" and isinstance(data, list):
+        return data
+    return None
+
 def ecoflow_pv_history(sn):
     """
     Holt die heutige PV-Verlaufsreihe (15-min/5-min) direkt vom EcoFlow BKW.
@@ -732,6 +798,22 @@ def ecoflow_status_bkw():
     if not sn_main and not sn_micro:
         raise RuntimeError("ECOFLOW_DEVICE_ID oder ECOFLOW_MIKRO_ID fehlt in api_key.py")
 
+    sn_for_resolve = sn_main or sn_micro
+    sn_main_effective = sn_for_resolve
+    try:
+        resolved = ecoflow_get_main_sn(sn_for_resolve)
+        if resolved:
+            sn_main_effective = resolved
+    except Exception as e:
+        logging.info("EcoFlow main-sn lookup failed: %s", e)
+
+    logging.info(
+        "EcoFlow SNs: configured_main=%s, micro=%s, resolved_main=%s",
+        sn_main or "-",
+        sn_micro or "-",
+        sn_main_effective or "-",
+    )
+
     device_map = {}
     try:
         devices = ecoflow_get_device_list()
@@ -746,10 +828,12 @@ def ecoflow_status_bkw():
                     name = dev.get("deviceName") or dev.get("name") or "-"
                     model = dev.get("model") or dev.get("productName") or "-"
                     dtype = dev.get("deviceType") or dev.get("type") or "-"
+                    online = dev.get("online")
                     device_map[sn] = {
                         "name": name or "-",
                         "model": model or "-",
                         "type": dtype or "-",
+                        "online": online,
                     }
                 except Exception:
                     continue
@@ -758,11 +842,11 @@ def ecoflow_status_bkw():
             logging.info("- Anzahl devices: %s", len(devices))
         except Exception:
             logging.info("- Anzahl devices: ?")
-        info_main = device_map.get(sn_main)
+        info_main = device_map.get(sn_main_effective)
         logging.info(
             "Batterie SN=%s in_list=%s name=%s type=%s",
-            sn_main or "-",
-            "yes" if sn_main and sn_main in device_map else "no",
+            sn_main_effective or "-",
+            "yes" if sn_main_effective and sn_main_effective in device_map else "no",
             (info_main or {}).get("name", "-"),
             (info_main or {}).get("type", "-"),
         )
@@ -779,38 +863,26 @@ def ecoflow_status_bkw():
 
     q_main, q_pv = {}, {}
     main_status = None
-    micro_status = None
-    q_pv_sel = {}
     try:
-        if sn_main:
+        if sn_main_effective:
             if ECO_DEBUG:
-                q_main, main_status = ecoflow_get_all_quota(sn_main, with_status=True)
+                q_main, main_status = ecoflow_get_all_quota(sn_main_effective, with_status=True)
             else:
-                q_main = ecoflow_get_all_quota(sn_main)
+                q_main = ecoflow_get_all_quota(sn_main_effective)
                 main_status = "quota/all"
             if ECO_DEBUG:
                 logging.info(
-                    "EcoFlow quota (%s) für Batterie %s",
+                    "EcoFlow quota (%s) für Batterie/System %s",
                     main_status or "?",
-                    sn_main,
+                    sn_main_effective,
                 )
             try:
                 with open("/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_quota_last.json", "w") as f:
                     json.dump(q_main, f, indent=2)
             except Exception:
                 pass
-        if sn_micro and sn_micro != sn_main:
-            if ECO_DEBUG:
-                q_pv, micro_status = ecoflow_get_all_quota(sn_micro, with_status=True)
-            else:
-                q_pv = ecoflow_get_all_quota(sn_micro)
-                micro_status = "quota/all"
-            if ECO_DEBUG:
-                logging.info(
-                    "EcoFlow quota (%s) für Wechselrichter %s",
-                    micro_status or "?",
-                    sn_micro,
-                )
+        if sn_micro and ECO_DEBUG and sn_micro != sn_main_effective:
+            logging.info("EcoFlow quota/all for micro skipped by default")
     except Exception as e:
         logging.error("EcoFlow quota/all fehlgeschlagen: %s", e)
         if os.path.exists(ECOFLOW_FALLBACK):
@@ -827,166 +899,38 @@ def ecoflow_status_bkw():
         }
 
     try:
+        logging.info("=== Batterie/System (HTTP Main-SN) ===")
+        logging.info("- SN: %s", sn_main_effective or "-")
+        try:
+            logging.info("- Keys: %s", len(q_main) if isinstance(q_main, dict) else 0)
+        except Exception:
+            logging.info("- Keys: ?")
+        batt_keys = [
+            "cmsBattSoc", "powGetBpCms", "powGetPvSum", "powGetPv1InputW", "powGetPv2InputW",
+            "powGetSysLoad", "powGetSysGrid", "gridConnectionPower", "feedGridMode",
+            "energyStrategyOperateMode.operateSelfPoweredOpen",
+            "energyStrategyOperateMode.operateIntelligentScheduleModeOpen",
+            "chargePower", "dischargePower", "remainingChargeTimeMins", "remainingDischargeTimeMins",
+        ]
+        for bk in batt_keys:
+            if isinstance(q_main, dict) and bk in q_main:
+                logging.info("  %s = %s", bk, q_main.get(bk))
+
+        logging.info("=== Mikro (HTTP) ===")
         if sn_micro:
-            try:
-                micro_hist = ecoflow_pv_history(sn_micro)
-                micro_points = len(micro_hist) if micro_hist is not None else 0
-                micro_latest_w = None
-                micro_latest_at = "-"
-                try:
-                    if micro_points:
-                        micro_latest_w = micro_hist.iloc[-1]
-                        micro_latest_at = micro_hist.index[-1].strftime("%H:%M")
-                except Exception:
-                    pass
-                logging.info(
-                    "EcoFlow quota/power micro SN=%s points=%s latest_w=%s at=%s",
-                    sn_micro,
-                    micro_points,
-                    micro_latest_w,
-                    micro_latest_at,
-                )
-            except Exception as e:
-                logging.info("EcoFlow quota/power micro SN=%s ERROR: %s", sn_micro, e)
-        if sn_main:
-            try:
-                batt_hist = ecoflow_pv_history(sn_main)
-                batt_points = len(batt_hist) if batt_hist is not None else 0
-                batt_latest_w = None
-                batt_latest_at = "-"
-                try:
-                    if batt_points:
-                        batt_latest_w = batt_hist.iloc[-1]
-                        batt_latest_at = batt_hist.index[-1].strftime("%H:%M")
-                except Exception:
-                    pass
-                logging.info(
-                    "EcoFlow quota/power batterie SN=%s points=%s latest_w=%s at=%s",
-                    sn_main,
-                    batt_points,
-                    batt_latest_w,
-                    batt_latest_at,
-                )
-            except Exception as e:
-                logging.info("EcoFlow quota/power batterie SN=%s ERROR: %s", sn_main, e)
+            info_micro = device_map.get(sn_micro, {})
+            logging.info(
+                "- SN=%s name=%s online=%s",
+                sn_micro,
+                info_micro.get("name", "-"),
+                info_micro.get("online"),
+            )
+        else:
+            logging.info("- Kein Mikro-SN konfiguriert")
+        if not q_pv:
+            logging.info("Micro per-device quotas via HTTP not available; use MQTT quota topic if needed")
     except Exception:
         pass
-
-    def _fmt_value(v):
-        try:
-            if isinstance(v, (dict, list, tuple, set)):
-                return f"<{type(v).__name__} len={len(v)}>"
-        except Exception:
-            pass
-        return v
-
-    if sn_micro:
-        try:
-            try:
-                quotas_micro = [
-                    "20_1.permanentWatts",
-                    "20_1.pv1InputWatts", "20_1.pv2InputWatts",
-                    "20_1.invOutputWatts",
-                    "20_1.feedInWatts",
-                    "20_1.loadWatts",
-                    "20_1.gridWatts",
-                ]
-                ecoflow_get_quota_selected_get(sn_micro, quotas_micro)
-            except Exception as e:
-                logging.info("EcoFlow selected quota GET-Test fehlgeschlagen: %s", e)
-            selected_quota_keys = [
-                "20_1.pv1InputWatts",
-                "20_1.pv2InputWatts",
-                "20_1.pv1InputVolts",
-                "20_1.pv2InputVolts",
-                "20_1.invOutputWatts",
-                "20_1.invOutputVolts",
-                "20_1.invOutputCur",
-                "20_1.feedInWatts",
-                "20_1.gridWatts",
-                "20_1.loadWatts",
-                "20_1.batInputWatts",
-                "20_1.batOutputWatts",
-                "20_1.batSoc",
-                "20_1.batVolts",
-                "20_1.batCur",
-                "20_1.temp",
-                "20_1.state",
-                "20_1.errCode",
-            ]
-            q_pv_sel = ecoflow_get_quota_selected(sn_micro, selected_quota_keys)
-            logging.info("=== EcoFlow API – Wechselrichter (SELECTED QUOTAS 20_1.*) ===")
-            try:
-                logging.info("- Keys: %s", len(q_pv_sel) if isinstance(q_pv_sel, dict) else 0)
-            except Exception:
-                logging.info("- Keys: ?")
-            if isinstance(q_pv_sel, dict):
-                for k, v in q_pv_sel.items():
-                    logging.info("  %s = %s", k, _fmt_value(v))
-            else:
-                logging.info(
-                    "  (unerwarteter Datentyp %s)",
-                    type(q_pv_sel).__name__,
-                )
-            try:
-                if not q_pv_sel:
-                    logging.warning(
-                        "Wechselrichter selected quotas returned empty; likely different quota namespace than 20_1.*"
-                    )
-            except Exception:
-                pass
-        except Exception as e:
-            logging.info("EcoFlow selected quota-Test fehlgeschlagen: %s", e)
-
-    try:
-        keys_batt = set(q_main.keys()) if isinstance(q_main, dict) else set()
-        keys_inv = set(q_pv.keys()) if isinstance(q_pv, dict) else set()
-
-        logging.info("=== EcoFlow API – Wechselrichter (RAW) ===")
-        logging.info("- SN: %s", sn_micro or "-")
-        logging.info("- Anzahl Keys: %s", len(keys_inv))
-        logging.info("- Vollständige PV-relevante Rohdaten:")
-        pv_entries = []
-        if isinstance(q_pv, dict):
-            for k, v in q_pv.items():
-                try:
-                    if not PV_PAT.search(str(k)):
-                        continue
-                    pv_entries.append((k, _fmt_value(v)))
-                except Exception:
-                    continue
-        for k, v in pv_entries:
-            logging.info("  %s = %s", k, v)
-        if not pv_entries:
-            logging.info("  (keine passenden Keys)")
-
-        logging.info("=== EcoFlow API – Wechselrichter (Core Candidates) ===")
-        core_keys = [
-            "powGetPvSum",
-            "powGetPv1InputW",
-            "powGetPv2InputW",
-            "pvPower",
-            "power",
-            "value",
-        ]
-        for ck in core_keys:
-            if isinstance(q_pv, dict) and ck in q_pv:
-                logging.info("  %s = %s", ck, _fmt_value(q_pv.get(ck)))
-
-        logging.info("=== EcoFlow API – Batterie (Kurzvergleich) ===")
-        for bk in ["cmsBattSoc", "powGetSysLoad", "powGetSysGrid"]:
-            if isinstance(q_main, dict) and bk in q_main:
-                logging.info("  %s = %s", bk, _fmt_value(q_main.get(bk)))
-
-        if ECO_DEBUG:
-            logging.info("=== Diff Batterie vs Wechselrichter ===")
-            logging.info("- only Wechselrichter: %s", sorted(list(keys_inv - keys_batt))[:120])
-            logging.info("- only Batterie: %s", sorted(list(keys_batt - keys_inv))[:120])
-    except Exception as e:
-        try:
-            logging.info("EcoFlow logging skipped: %s", e)
-        except Exception:
-            pass
 
     def num(src, key, default=None):
         v = src.get(key) if src else None
