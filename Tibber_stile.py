@@ -298,7 +298,8 @@ def get_pv_series(slots_dt, eco=None):
             eco = ecoflow_status_bkw()
         pv_watt = eco.get("pv_input_w_sum") or eco.get("pv_w")
         pv_watt = float(pv_watt or 0.0)
-        logging.info(f"EcoFlow PV aktuell: {pv_watt} W")
+        if ECO_DEBUG:
+            logging.info(f"EcoFlow PV aktuell: {pv_watt} W")
         return pd.Series([pv_watt] * len(slots_dt))
     except Exception as e:
         logging.error(f"PV aus EcoFlow fehlgeschlagen: {e}")
@@ -580,7 +581,12 @@ def ecoflow_status_bkw():
             else:
                 q_main = ecoflow_get_all_quota(sn_main)
                 main_status = "quota/all"
-            logging.info("EcoFlow quota/all via API für Hauptgerät %s", sn_main)
+            if ECO_DEBUG:
+                logging.info(
+                    "EcoFlow quota (%s) für Batterie %s",
+                    main_status or "?",
+                    sn_main,
+                )
             try:
                 with open("/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_quota_last.json", "w") as f:
                     json.dump(q_main, f, indent=2)
@@ -592,7 +598,12 @@ def ecoflow_status_bkw():
             else:
                 q_pv = ecoflow_get_all_quota(sn_micro)
                 micro_status = "quota/all"
-            logging.info("EcoFlow quota/all via API für Mikrogerät %s", sn_micro)
+            if ECO_DEBUG:
+                logging.info(
+                    "EcoFlow quota (%s) für Wechselrichter %s",
+                    micro_status or "?",
+                    sn_micro,
+                )
     except Exception as e:
         logging.error("EcoFlow quota/all fehlgeschlagen: %s", e)
         if os.path.exists(ECOFLOW_FALLBACK):
@@ -1027,13 +1038,14 @@ def main():
     eco = {}
     try:
         eco = ecoflow_status_bkw()  # liefert dict mit u.a. pv_input_w_sum, powGetPvSum, powGetSysGrid, powGetSysLoad, power_w, cmsBattSoc
-        logging.info(
-            "EcoFlow Live-Status: PV=%s W, Grid=%s W, Load=%s W, SoC=%s%%",
-            eco.get('pv_input_w_sum') or eco.get('powGetPvSum'),
-            eco.get('grid_w'),
-            eco.get('load_w'),
-            eco.get('soc')
-        )
+        if ECO_DEBUG:
+            logging.info(
+                "EcoFlow Live-Status: PV=%s W, Grid=%s W, Load=%s W, SoC=%s%%",
+                eco.get('pv_input_w_sum') or eco.get('powGetPvSum'),
+                eco.get('grid_w'),
+                eco.get('load_w'),
+                eco.get('soc')
+            )
     except Exception as e:
         logging.error(f"EcoFlow Status fehlgeschlagen: {e}")
         eco = {}
@@ -1062,9 +1074,6 @@ def main():
         "Wetterdaten via Open-Meteo (lat=%.4f, lon=%.4f): heute=%.1f h, morgen=%.1f h",
         api_key.LAT, api_key.LON, sun_today, sun_tomorrow
     )
-
-    # EcoFlow: signierte BKW-Variante
-    eco = ecoflow_status_bkw()
 
     # Canvas
     img  = Image.new('1', (w, h), 255)
