@@ -1072,18 +1072,18 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     for i, (op, label, value) in enumerate(entries):
         y_row = base_y + i * 16
         if op:
-            d.text((op_x, y_row), op, font=fonts['small'], fill=0)
-        d.text((lbl_x, y_row), f"{label}:", font=fonts['small'], fill=0)
-        d.text((val_x, y_row), fmt_w(value), font=fonts['small'], fill=0)
+            d.text((op_x, y_row), op, font=fonts['tiny'], fill=0)
+        d.text((lbl_x, y_row), f"{label}:", font=fonts['tiny'], fill=0)
+        d.text((val_x, y_row), fmt_w(value), font=fonts['tiny'], fill=0)
 
     # Trennlinie vor dem Ergebnis
     line_y = base_y + len(entries) * 16 + 3
     d.line((base_x, line_y, base_x + 120, line_y), fill=0, width=1)
 
     result_y = line_y + 4
-    d.text((op_x, result_y), "=", font=fonts['small'], fill=0)
-    d.text((lbl_x, result_y), "Last:", font=fonts['small'], fill=0)
-    d.text((val_x, result_y), fmt_w(load_w), font=fonts['small'], fill=0)
+    d.text((op_x, result_y), "=", font=fonts['tiny'], fill=0)
+    d.text((lbl_x, result_y), "Last:", font=fonts['tiny'], fill=0)
+    d.text((val_x, result_y), fmt_w(load_w), font=fonts['tiny'], fill=0)
 
 
 def draw_info_box(d, info, fonts, y, width):
