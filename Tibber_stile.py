@@ -468,6 +468,22 @@ def ecoflow_get_all_quota(sn, with_status=False):
     except Exception:
         j = {"raw": r.text}
 
+    data = j.get("data") if isinstance(j, dict) else None
+    data_type = type(data).__name__
+    try:
+        data_len = len(data) if isinstance(data, (dict, list)) else 0
+    except Exception:
+        data_len = 0
+    logging.info(
+        "EcoFlow RAW quota/all sn=%s http=%s code=%s msg=%s data_type=%s data_len=%s",
+        sn,
+        r.status_code,
+        j.get("code") if isinstance(j, dict) else None,
+        j.get("message") if isinstance(j, dict) else None,
+        data_type,
+        data_len,
+    )
+
     status_label = "quota/all"
     if r.status_code == 200 and str(j.get("code")) == "0":
         data = j.get("data", {}) or {}
@@ -482,6 +498,22 @@ def ecoflow_get_all_quota(sn, with_status=False):
         j_alt = r_alt.json()
     except Exception:
         j_alt = {"raw": r_alt.text}
+
+    data_alt = j_alt.get("data") if isinstance(j_alt, dict) else None
+    data_alt_type = type(data_alt).__name__
+    try:
+        data_alt_len = len(data_alt) if isinstance(data_alt, (dict, list)) else 0
+    except Exception:
+        data_alt_len = 0
+    logging.info(
+        "EcoFlow RAW quota/fallback sn=%s http=%s code=%s msg=%s data_type=%s data_len=%s",
+        sn,
+        r_alt.status_code,
+        j_alt.get("code") if isinstance(j_alt, dict) else None,
+        j_alt.get("message") if isinstance(j_alt, dict) else None,
+        data_alt_type,
+        data_alt_len,
+    )
     if r_alt.status_code == 200 and str(j_alt.get("code")) == "0":
         status_label = "quota fallback"
         data = j_alt.get("data", {}) or {}
@@ -492,6 +524,50 @@ def ecoflow_get_all_quota(sn, with_status=False):
             f"HTTP {r.status_code}", str(j)[:200], f"HTTP {r_alt.status_code}", str(j_alt)[:200]
         )
     )
+
+
+def ecoflow_get_quota_selected(sn, quotas: list[str]) -> dict:
+    base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
+    path = "/iot-open/sign/device/quota"
+    query = {"sn": sn}
+    body = {
+        "sn": sn,
+        "params": {
+            "quotas": quotas,
+        },
+    }
+    hdr = _signed_headers(
+        api_key.ECOFLOW_APP_KEY,
+        api_key.ECOFLOW_SECRET_KEY,
+        body,
+        content_type="application/json",
+    )
+    url = f"{base}{path}?{urlencode(query)}"
+    r = requests.post(url, headers=hdr, json=body, timeout=12)
+    try:
+        j = r.json()
+    except Exception:
+        j = {"raw": r.text}
+
+    data = j.get("data") if isinstance(j, dict) else None
+    data_type = type(data).__name__
+    try:
+        data_len = len(data) if isinstance(data, (dict, list)) else 0
+    except Exception:
+        data_len = 0
+    logging.info(
+        "EcoFlow selected quota sn=%s http=%s code=%s msg=%s data_type=%s data_len=%s",
+        sn,
+        r.status_code,
+        j.get("code") if isinstance(j, dict) else None,
+        j.get("message") if isinstance(j, dict) else None,
+        data_type,
+        data_len,
+    )
+
+    if r.status_code == 200 and str(j.get("code")) == "0":
+        return data or {}
+    raise RuntimeError(f"EcoFlow selected quota fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
 
 
 def ecoflow_pv_history(sn):
@@ -574,6 +650,7 @@ def ecoflow_status_bkw():
     q_main, q_pv = {}, {}
     main_status = None
     micro_status = None
+    q_pv_sel = {}
     try:
         if sn_main:
             if ECO_DEBUG:
@@ -626,6 +703,34 @@ def ecoflow_status_bkw():
         except Exception:
             pass
         return v
+
+    if sn_micro:
+        try:
+            selected_quota_keys = [
+                "powGetPvSum",
+                "powGetPv1InputW",
+                "powGetPv2InputW",
+                "powGetSysLoad",
+                "powGetSysGrid",
+                "cmsBattSoc",
+                "powGetBpCms",
+            ]
+            q_pv_sel = ecoflow_get_quota_selected(sn_micro, selected_quota_keys)
+            logging.info("=== EcoFlow API – Wechselrichter (SELECTED QUOTAS) ===")
+            try:
+                logging.info("- Anzahl Keys: %s", len(q_pv_sel))
+            except Exception:
+                logging.info("- Anzahl Keys: ?")
+            if isinstance(q_pv_sel, dict):
+                for k, v in q_pv_sel.items():
+                    logging.info("  %s = %s", k, _fmt_value(v))
+            else:
+                logging.info(
+                    "  (unerwarteter Datentyp %s)",
+                    type(q_pv_sel).__name__,
+                )
+        except Exception as e:
+            logging.info("EcoFlow selected quota-Test fehlgeschlagen: %s", e)
 
     try:
         keys_batt = set(q_main.keys()) if isinstance(q_main, dict) else set()
