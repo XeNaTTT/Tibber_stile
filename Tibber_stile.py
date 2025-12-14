@@ -7,9 +7,9 @@ import pandas as pd, numpy as np
 from urllib.parse import urlencode
 import re
 
-ECO_DEBUG = str(os.getenv("ECO_DEBUG", "")).lower() in {"1", "true", "yes", "on"}
+ECO_DEBUG = bool(int(os.getenv("ECO_DEBUG", "0")))
+PV_PAT = re.compile(r"(pv|solar|yield|gen|power|input|watt|energy)", re.I)
 DUMP_DIR = "/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_dump"
-PV_KEY_PATTERN = re.compile(r"(pv|solar|yield|gen|power|input|watt|energy)", re.IGNORECASE)
 
 # Zeitzone
 try:
@@ -84,7 +84,7 @@ def _pv_candidates(d):
     out = []
     for k, v in d.items():
         try:
-            if not PV_KEY_PATTERN.search(str(k)):
+            if not PV_PAT.search(str(k)):
                 continue
             example = v
             if isinstance(v, (list, tuple)) and v:
@@ -95,6 +95,19 @@ def _pv_candidates(d):
         except Exception:
             continue
     return out
+
+
+def pick(src, keys):
+    res = {}
+    if not isinstance(src, dict):
+        return res
+    for k in keys:
+        try:
+            if k in src:
+                res[k] = src.get(k)
+        except Exception:
+            continue
+    return res
 
 # ---------- Tibber ----------
 def tibber_priceinfo():
@@ -597,41 +610,15 @@ def ecoflow_status_bkw():
 
     if ECO_DEBUG:
         try:
-            device_names = {}
-            try:
-                for dev in ecoflow_get_device_list():
-                    sn = str(dev.get("sn") or dev.get("deviceSn") or dev.get("id") or "").strip()
-                    name = dev.get("deviceName") or dev.get("name") or dev.get("deviceAlias") or "-"
-                    if sn:
-                        device_names[sn] = name
-            except Exception as e:
-                logging.info("EcoFlow device/list für Debug fehlgeschlagen: %s", e)
+            keys_batt = set(q_main.keys()) if isinstance(q_main, dict) else set()
+            keys_inv = set(q_pv.keys()) if isinstance(q_pv, dict) else set()
 
-            def _dev_name(sn):
-                return device_names.get(sn, "-") if sn else "-"
-
-            def _std_values(src, keys):
-                out = {}
-                if isinstance(src, dict):
-                    for k in keys:
-                        if k in src:
-                            out[k] = src.get(k)
-                    for k, v in src.items():
-                        if isinstance(k, str) and k.startswith("energyStrategyOperateMode"):
-                            out[k] = v
-                return out
-
-            main_dump = _dump_json("ecoflow_main", q_main) if q_main else None
-            micro_dump = _dump_json("ecoflow_micro", q_pv) if q_pv else None
-
-            main_candidates = _pv_candidates(q_main)
-            logging.info("=== EcoFlow Debug: Batterie (SN=%s, Name=%s) ===", sn_main or "-", _dev_name(sn_main))
-            logging.info("- HTTP/Call-Status: %s", main_status or "-")
-            logging.info("- PV CANDIDATES: %s", main_candidates)
-            logging.info("- KEY COUNT: %s", len(q_main) if isinstance(q_main, dict) else 0)
+            logging.info("=== EcoFlow Debug: Batterie (SN=%s) ===", sn_main or "-")
+            logging.info("- Anzahl Keys: %s", len(keys_batt))
+            logging.info("- PV CANDIDATES: %s", _pv_candidates(q_main))
             logging.info(
-                "- Wichtige Standardwerte: %s",
-                _std_values(
+                "- core values: %s",
+                pick(
                     q_main,
                     [
                         "cmsBattSoc",
@@ -643,54 +630,28 @@ def ecoflow_status_bkw():
                     ],
                 ),
             )
-            logging.info("- Dump-Pfad: %s", main_dump or "-")
 
-            if q_pv:
-                micro_candidates = _pv_candidates(q_pv)
-                logging.info("=== EcoFlow Debug: Wechselrichter (SN=%s, Name=%s) ===", sn_micro or "-", _dev_name(sn_micro))
-                logging.info("- HTTP/Call-Status: %s", micro_status or "-")
-                logging.info("- PV CANDIDATES: %s", micro_candidates)
-                logging.info("- KEY COUNT: %s", len(q_pv) if isinstance(q_pv, dict) else 0)
-                logging.info(
-                    "- Wichtige Standardwerte: %s",
-                    _std_values(
-                        q_pv,
-                        [
-                            "powGetPvSum",
-                            "powGetPv1InputW",
-                            "powGetPv2InputW",
-                            "pvPower",
-                            "power",
-                            "value",
-                            "energy",
-                            "yield",
-                        ],
-                    ),
-                )
-                logging.info("- Dump-Pfad: %s", micro_dump or "-")
-            else:
-                logging.info("=== EcoFlow Debug: Wechselrichter (SN=%s, Name=%s) ===", sn_micro or "-", _dev_name(sn_micro))
-                logging.info("- HTTP/Call-Status: %s", micro_status or "-")
-                logging.info("- PV CANDIDATES: []")
-                logging.info("- KEY COUNT: 0")
-                logging.info("- Wichtige Standardwerte: {}")
-                logging.info("- Dump-Pfad: -")
+            logging.info("=== EcoFlow Debug: Wechselrichter (SN=%s) ===", sn_micro or "-")
+            logging.info("- Anzahl Keys: %s", len(keys_inv))
+            logging.info("- PV CANDIDATES: %s", _pv_candidates(q_pv))
+            logging.info(
+                "- core values: %s",
+                pick(
+                    q_pv,
+                    [
+                        "powGetPvSum",
+                        "powGetPv1InputW",
+                        "powGetPv2InputW",
+                        "pvPower",
+                        "power",
+                        "value",
+                    ],
+                ),
+            )
 
-            if isinstance(q_main, dict) and isinstance(q_pv, dict) and (q_main or q_pv):
-                main_keys = set(q_main.keys())
-                micro_keys = set(q_pv.keys())
-                only_micro = sorted(micro_keys - main_keys)
-                only_main = sorted(main_keys - micro_keys)
-                both_keys = sorted(main_keys & micro_keys)
-                logging.info("=== EcoFlow Debug: Diff Batterie vs Wechselrichter ===")
-                logging.info("- Keys only Wechselrichter: %s", only_micro)
-                logging.info("- Keys only Batterie: %s", only_main)
-                logging.info("- Keys both (Anzahl): %d", len(both_keys))
-            elif isinstance(q_main, dict) or isinstance(q_pv, dict):
-                logging.info("=== EcoFlow Debug: Diff Batterie vs Wechselrichter ===")
-                logging.info("- Keys only Wechselrichter: %s", [] if not isinstance(q_pv, dict) else sorted(q_pv.keys()))
-                logging.info("- Keys only Batterie: %s", [] if not isinstance(q_main, dict) else sorted(q_main.keys()))
-            
+            logging.info("=== Diff Batterie vs Wechselrichter ===")
+            logging.info("- only Wechselrichter: %s", sorted(list(keys_inv - keys_batt))[:120])
+            logging.info("- only Batterie: %s", sorted(list(keys_batt - keys_inv))[:120])
         except Exception as e:
             try:
                 logging.info("EcoFlow debug logging skipped: %s", e)
