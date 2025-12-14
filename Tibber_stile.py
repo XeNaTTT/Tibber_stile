@@ -647,6 +647,51 @@ def ecoflow_status_bkw():
     if not sn_main and not sn_micro:
         raise RuntimeError("ECOFLOW_DEVICE_ID oder ECOFLOW_MIKRO_ID fehlt in api_key.py")
 
+    device_map = {}
+    try:
+        devices = ecoflow_get_device_list()
+        if isinstance(devices, list):
+            for dev in devices:
+                try:
+                    if not isinstance(dev, dict):
+                        continue
+                    sn = dev.get("sn") or dev.get("deviceSn")
+                    if not sn:
+                        continue
+                    name = dev.get("deviceName") or dev.get("name") or "-"
+                    model = dev.get("model") or dev.get("productName") or "-"
+                    dtype = dev.get("deviceType") or dev.get("type") or "-"
+                    device_map[sn] = {
+                        "name": name or "-",
+                        "model": model or "-",
+                        "type": dtype or "-",
+                    }
+                except Exception:
+                    continue
+        logging.info("=== EcoFlow device/list ===")
+        try:
+            logging.info("- Anzahl devices: %s", len(devices))
+        except Exception:
+            logging.info("- Anzahl devices: ?")
+        info_main = device_map.get(sn_main)
+        logging.info(
+            "Batterie SN=%s in_list=%s name=%s type=%s",
+            sn_main or "-",
+            "yes" if sn_main and sn_main in device_map else "no",
+            (info_main or {}).get("name", "-"),
+            (info_main or {}).get("type", "-"),
+        )
+        info_micro = device_map.get(sn_micro)
+        logging.info(
+            "Wechselrichter SN=%s in_list=%s name=%s type=%s",
+            sn_micro or "-",
+            "yes" if sn_micro and sn_micro in device_map else "no",
+            (info_micro or {}).get("name", "-"),
+            (info_micro or {}).get("type", "-"),
+        )
+    except Exception as e:
+        logging.info("device/list ERROR: %s", e)
+
     q_main, q_pv = {}, {}
     main_status = None
     micro_status = None
@@ -695,6 +740,52 @@ def ecoflow_status_bkw():
             "pv_input_w_sum": None, "pv1_input_w": None, "pv2_input_w": None,
             "grid_w": None, "load_w": None
         }
+
+    try:
+        if sn_micro:
+            try:
+                micro_hist = ecoflow_pv_history(sn_micro)
+                micro_points = len(micro_hist) if micro_hist is not None else 0
+                micro_latest_w = None
+                micro_latest_at = "-"
+                try:
+                    if micro_points:
+                        micro_latest_w = micro_hist.iloc[-1]
+                        micro_latest_at = micro_hist.index[-1].strftime("%H:%M")
+                except Exception:
+                    pass
+                logging.info(
+                    "EcoFlow quota/power micro SN=%s points=%s latest_w=%s at=%s",
+                    sn_micro,
+                    micro_points,
+                    micro_latest_w,
+                    micro_latest_at,
+                )
+            except Exception as e:
+                logging.info("EcoFlow quota/power micro SN=%s ERROR: %s", sn_micro, e)
+        if sn_main:
+            try:
+                batt_hist = ecoflow_pv_history(sn_main)
+                batt_points = len(batt_hist) if batt_hist is not None else 0
+                batt_latest_w = None
+                batt_latest_at = "-"
+                try:
+                    if batt_points:
+                        batt_latest_w = batt_hist.iloc[-1]
+                        batt_latest_at = batt_hist.index[-1].strftime("%H:%M")
+                except Exception:
+                    pass
+                logging.info(
+                    "EcoFlow quota/power batterie SN=%s points=%s latest_w=%s at=%s",
+                    sn_main,
+                    batt_points,
+                    batt_latest_w,
+                    batt_latest_at,
+                )
+            except Exception as e:
+                logging.info("EcoFlow quota/power batterie SN=%s ERROR: %s", sn_main, e)
+    except Exception:
+        pass
 
     def _fmt_value(v):
         try:
