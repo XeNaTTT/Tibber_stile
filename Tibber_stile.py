@@ -566,6 +566,29 @@ def ecoflow_get_quota_selected(sn, quotas: list[str]) -> dict:
     )
 
     if r.status_code == 200 and str(j.get("code")) == "0":
+        try:
+            if data is None:
+                logging.info("EcoFlow selected quota raw data=None")
+            elif isinstance(data, dict):
+                compact_parts = []
+                for dk, dv in data.items():
+                    try:
+                        if isinstance(dv, dict):
+                            compact_parts.append(f"{dk}=<dict len={len(dv)}>")
+                        elif isinstance(dv, list):
+                            compact_parts.append(f"{dk}=<list len={len(dv)}>")
+                        else:
+                            compact_parts.append(f"{dk}={dv}")
+                    except Exception:
+                        continue
+                logging.info("EcoFlow selected quota raw data: %s", "; ".join(compact_parts))
+            else:
+                logging.info("EcoFlow selected quota raw data: %s", data)
+        except Exception:
+            try:
+                logging.info("EcoFlow selected quota raw data logging failed")
+            except Exception:
+                pass
         return data or {}
     raise RuntimeError(f"EcoFlow selected quota fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
 
@@ -798,20 +821,31 @@ def ecoflow_status_bkw():
     if sn_micro:
         try:
             selected_quota_keys = [
-                "powGetPvSum",
-                "powGetPv1InputW",
-                "powGetPv2InputW",
-                "powGetSysLoad",
-                "powGetSysGrid",
-                "cmsBattSoc",
-                "powGetBpCms",
+                "20_1.pv1InputWatts",
+                "20_1.pv2InputWatts",
+                "20_1.pv1InputVolts",
+                "20_1.pv2InputVolts",
+                "20_1.invOutputWatts",
+                "20_1.invOutputVolts",
+                "20_1.invOutputCur",
+                "20_1.feedInWatts",
+                "20_1.gridWatts",
+                "20_1.loadWatts",
+                "20_1.batInputWatts",
+                "20_1.batOutputWatts",
+                "20_1.batSoc",
+                "20_1.batVolts",
+                "20_1.batCur",
+                "20_1.temp",
+                "20_1.state",
+                "20_1.errCode",
             ]
             q_pv_sel = ecoflow_get_quota_selected(sn_micro, selected_quota_keys)
-            logging.info("=== EcoFlow API – Wechselrichter (SELECTED QUOTAS) ===")
+            logging.info("=== EcoFlow API – Wechselrichter (SELECTED QUOTAS 20_1.*) ===")
             try:
-                logging.info("- Anzahl Keys: %s", len(q_pv_sel))
+                logging.info("- Keys: %s", len(q_pv_sel) if isinstance(q_pv_sel, dict) else 0)
             except Exception:
-                logging.info("- Anzahl Keys: ?")
+                logging.info("- Keys: ?")
             if isinstance(q_pv_sel, dict):
                 for k, v in q_pv_sel.items():
                     logging.info("  %s = %s", k, _fmt_value(v))
@@ -820,6 +854,13 @@ def ecoflow_status_bkw():
                     "  (unerwarteter Datentyp %s)",
                     type(q_pv_sel).__name__,
                 )
+            try:
+                if not q_pv_sel:
+                    logging.warning(
+                        "Wechselrichter selected quotas returned empty; likely different quota namespace than 20_1.*"
+                    )
+            except Exception:
+                pass
         except Exception as e:
             logging.info("EcoFlow selected quota-Test fehlgeschlagen: %s", e)
 
