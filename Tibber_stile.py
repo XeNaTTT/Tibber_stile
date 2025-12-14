@@ -672,19 +672,34 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     grid_w  = st.get('grid_w') or st.get('powGetSysGrid') or st.get('gridConnectionPower')
     load_w  = st.get('load_w') or st.get('powGetSysLoad')
 
-    lines_left = [
-        f"Leistung: {fmt_w(power_w)}",        # Batterie (+ Entladen, - Laden)
-        f"PV-Ertrag: {fmt_w(pv_w)}"           # Aktuelle PV-Einspeisung
-    ]
-    lines_right = [
-        f"Netz: {fmt_w(grid_w)}",             # Bezug (+) / Einspeisung (-)
-        f"Last: {fmt_w(load_w)}"              # Haushaltsverbrauch
+    # Rechenweg: Leistung + PV-Ertrag + Netz = Last
+    base_x = batt_x + 120 + text_offset
+    op_x   = base_x
+    lbl_x  = base_x + 12
+    val_x  = base_x + 105
+    base_y = batt_y - 4
+
+    entries = [
+        ("", "Leistung", power_w),          # Batterie (+ Entladen, - Laden)
+        ("+", "PV-Ertrag", pv_w),           # Aktuelle PV-Einspeisung
+        ("+", "Netz", grid_w)               # Bezug (+) / Einspeisung (-)
     ]
 
-    for i, t in enumerate(lines_left):
-        d.text((batt_x + 120 + text_offset, batt_y - 4 + i * 16), t, font=fonts['small'], fill=0)
-    for i, t in enumerate(lines_right):
-        d.text((batt_x + 260 + text_offset, batt_y - 4 + i * 16), t, font=fonts['small'], fill=0)
+    for i, (op, label, value) in enumerate(entries):
+        y_row = base_y + i * 16
+        if op:
+            d.text((op_x, y_row), op, font=fonts['small'], fill=0)
+        d.text((lbl_x, y_row), f"{label}:", font=fonts['small'], fill=0)
+        d.text((val_x, y_row), fmt_w(value), font=fonts['small'], fill=0)
+
+    # Trennlinie vor dem Ergebnis
+    line_y = base_y + len(entries) * 16 + 3
+    d.line((base_x, line_y, base_x + 120, line_y), fill=0, width=1)
+
+    result_y = line_y + 4
+    d.text((op_x, result_y), "=", font=fonts['small'], fill=0)
+    d.text((lbl_x, result_y), "Last:", font=fonts['small'], fill=0)
+    d.text((val_x, result_y), fmt_w(load_w), font=fonts['small'], fill=0)
 
 
 def draw_info_box(d, info, fonts, y, width):
