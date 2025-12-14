@@ -619,55 +619,63 @@ def ecoflow_status_bkw():
             "grid_w": None, "load_w": None
         }
 
-    if ECO_DEBUG:
+    def _fmt_value(v):
         try:
-            keys_batt = set(q_main.keys()) if isinstance(q_main, dict) else set()
-            keys_inv = set(q_pv.keys()) if isinstance(q_pv, dict) else set()
+            if isinstance(v, (dict, list, tuple, set)):
+                return f"<{type(v).__name__} len={len(v)}>"
+        except Exception:
+            pass
+        return v
 
-            logging.info("=== EcoFlow Debug: Batterie (SN=%s) ===", sn_main or "-")
-            logging.info("- Anzahl Keys: %s", len(keys_batt))
-            logging.info("- PV CANDIDATES: %s", _pv_candidates(q_main))
-            logging.info(
-                "- core values: %s",
-                pick(
-                    q_main,
-                    [
-                        "cmsBattSoc",
-                        "powGetBpCms",
-                        "powGetSysLoad",
-                        "powGetSysGrid",
-                        "gridConnectionPower",
-                        "feedGridMode",
-                    ],
-                ),
-            )
+    try:
+        keys_batt = set(q_main.keys()) if isinstance(q_main, dict) else set()
+        keys_inv = set(q_pv.keys()) if isinstance(q_pv, dict) else set()
 
-            logging.info("=== EcoFlow Debug: Wechselrichter (SN=%s) ===", sn_micro or "-")
-            logging.info("- Anzahl Keys: %s", len(keys_inv))
-            logging.info("- PV CANDIDATES: %s", _pv_candidates(q_pv))
-            logging.info(
-                "- core values: %s",
-                pick(
-                    q_pv,
-                    [
-                        "powGetPvSum",
-                        "powGetPv1InputW",
-                        "powGetPv2InputW",
-                        "pvPower",
-                        "power",
-                        "value",
-                    ],
-                ),
-            )
+        logging.info("=== EcoFlow API – Wechselrichter (RAW) ===")
+        logging.info("- SN: %s", sn_micro or "-")
+        logging.info("- Anzahl Keys: %s", len(keys_inv))
+        logging.info("- Vollständige PV-relevante Rohdaten:")
+        pv_entries = []
+        if isinstance(q_pv, dict):
+            for k, v in q_pv.items():
+                try:
+                    if not PV_PAT.search(str(k)):
+                        continue
+                    pv_entries.append((k, _fmt_value(v)))
+                except Exception:
+                    continue
+        for k, v in pv_entries:
+            logging.info("  %s = %s", k, v)
+        if not pv_entries:
+            logging.info("  (keine passenden Keys)")
 
+        logging.info("=== EcoFlow API – Wechselrichter (Core Candidates) ===")
+        core_keys = [
+            "powGetPvSum",
+            "powGetPv1InputW",
+            "powGetPv2InputW",
+            "pvPower",
+            "power",
+            "value",
+        ]
+        for ck in core_keys:
+            if isinstance(q_pv, dict) and ck in q_pv:
+                logging.info("  %s = %s", ck, _fmt_value(q_pv.get(ck)))
+
+        logging.info("=== EcoFlow API – Batterie (Kurzvergleich) ===")
+        for bk in ["cmsBattSoc", "powGetSysLoad", "powGetSysGrid"]:
+            if isinstance(q_main, dict) and bk in q_main:
+                logging.info("  %s = %s", bk, _fmt_value(q_main.get(bk)))
+
+        if ECO_DEBUG:
             logging.info("=== Diff Batterie vs Wechselrichter ===")
             logging.info("- only Wechselrichter: %s", sorted(list(keys_inv - keys_batt))[:120])
             logging.info("- only Batterie: %s", sorted(list(keys_batt - keys_inv))[:120])
-        except Exception as e:
-            try:
-                logging.info("EcoFlow debug logging skipped: %s", e)
-            except Exception:
-                pass
+    except Exception as e:
+        try:
+            logging.info("EcoFlow logging skipped: %s", e)
+        except Exception:
+            pass
 
     def num(src, key, default=None):
         v = src.get(key) if src else None
