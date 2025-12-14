@@ -82,7 +82,14 @@ def tibber_priceinfo():
     if isinstance(j, dict) and j.get("errors"):
         raise RuntimeError(f"Tibber GraphQL Fehler: {j['errors']}")
     try:
-        return j['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
+        pi = j['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
+        logging.info(
+            "Tibber Preisinfo via API: heute=%d, morgen=%d, current=%s",
+            len(pi.get("today", []) or []),
+            len(pi.get("tomorrow", []) or []),
+            safe_get(pi, "current", "startsAt", default="-")
+        )
+        return pi
     except Exception as e:
         raise RuntimeError(f"Tibber Antwort unerwartet: {e}, payload keys: {list(j.keys())}")
 
@@ -509,6 +516,7 @@ def ecoflow_status_bkw():
     try:
         if sn_main:
             q_main = ecoflow_get_all_quota(sn_main)
+            logging.info("EcoFlow quota/all via API für Hauptgerät %s", sn_main)
             try:
                 with open("/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_quota_last.json", "w") as f:
                     json.dump(q_main, f, indent=2)
@@ -516,6 +524,7 @@ def ecoflow_status_bkw():
                 pass
         if sn_micro and sn_micro != sn_main:
             q_pv = ecoflow_get_all_quota(sn_micro)
+            logging.info("EcoFlow quota/all via API für Mikrogerät %s", sn_micro)
     except Exception as e:
         logging.error("EcoFlow quota/all fehlgeschlagen: %s", e)
         if os.path.exists(ECOFLOW_FALLBACK):
@@ -524,6 +533,7 @@ def ecoflow_status_bkw():
                     return json.load(f)
             except Exception:
                 pass
+        logging.info("EcoFlow Fallback-Datei wurde nicht genutzt oder existiert nicht")
         return {
             "soc": None, "power_w": None, "mode": None, "eta_min": None,
             "pv_input_w_sum": None, "pv1_input_w": None, "pv2_input_w": None,
@@ -823,10 +833,12 @@ def main():
     w, h = epd.width, epd.height
 
     # Daten laden, robust gegen API-Ausfall
+    tibber_source = "api"
     try:
         pi = tibber_priceinfo()
         update_price_cache(pi)
     except Exception as e:
+        tibber_source = "cache"
         logging.error("Nutze Cache wegen Fehler: %s", e)
         today_cache = load_cache(CACHE_TODAY) or {"data": []}
         yesterday_cache = load_cache(CACHE_YESTERDAY) or {"data": []}
@@ -836,6 +848,11 @@ def main():
             'current': {'startsAt': dt.datetime.now(LOCAL_TZ).isoformat(),
                         'total': (today_cache.get('data',[{'total':0}])[0].get('total', 0) or 0)}
         }
+        logging.info(
+            "Tibber Preisinfo aus Cache: heute=%d (Datei), morgen=0, current=%s",
+            len(pi.get('today', []) or []),
+            pi.get('current', {}).get('startsAt', '-')
+        )
 
     quarter_range = None
     try:
@@ -857,6 +874,13 @@ def main():
         left_date = dt.date.today() - dt.timedelta(days=1)
         right_date = dt.date.today()
 
+    logging.info(
+        "Preis-Slots Quelle: %s, linke Achse=%s (%d Werte), rechte Achse=%s (%d Werte)",
+        tibber_source,
+        labels[0], len(left or []),
+        labels[1], len(right or [])
+    )
+
     if quarter_range and quarter_range.get("range", {}).get("nodes"):
         nodes = quarter_range["range"].get("nodes", [])
         left_q = _filter_range_for_date(nodes, left_date)
@@ -870,6 +894,13 @@ def main():
     eco = {}
     try:
         eco = ecoflow_status_bkw()  # liefert dict mit u.a. pv_input_w_sum, powGetPvSum, powGetSysGrid, powGetSysLoad, power_w, cmsBattSoc
+        logging.info(
+            "EcoFlow Live-Status: PV=%s W, Grid=%s W, Load=%s W, SoC=%s%%",
+            eco.get('pv_input_w_sum') or eco.get('powGetPvSum'),
+            eco.get('grid_w'),
+            eco.get('load_w'),
+            eco.get('soc')
+        )
     except Exception as e:
         logging.error(f"EcoFlow Status fehlgeschlagen: {e}")
         eco = {}
@@ -881,10 +912,23 @@ def main():
     pv_right = get_pv_series(tr_dt, eco=eco)
 
     hourly = tibber_hourly_consumption(last=48)
+    if hourly:
+        logging.info(
+            "Tibber Verbrauchsdaten via API: letzte %d Stunden, Start=%s, Ende=%s",
+            len(hourly),
+            hourly[0][0].strftime("%Y-%m-%d %H:%M"),
+            hourly[-1][0].strftime("%Y-%m-%d %H:%M")
+        )
+    else:
+        logging.info("Keine Tibber-Verbrauchsdaten erhalten")
     cons_left  = upsample_hourly_to_quarter(tl_dt, hourly)
     cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
     sun_today, sun_tomorrow = sunshine_hours_both(api_key.LAT, api_key.LON)
+    logging.info(
+        "Wetterdaten via Open-Meteo (lat=%.4f, lon=%.4f): heute=%.1f h, morgen=%.1f h",
+        api_key.LAT, api_key.LON, sun_today, sun_tomorrow
+    )
 
     # EcoFlow: signierte BKW-Variante
     eco = ecoflow_status_bkw()
