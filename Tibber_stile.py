@@ -840,11 +840,11 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     load_w  = st.get('load_w') or st.get('powGetSysLoad')
 
     # Rechenweg: Leistung + PV-Ertrag + Netz = Last
-    base_x = batt_x + 120 + text_offset
+    base_x = x + w - 140
     op_x   = base_x
     lbl_x  = base_x + 12
     val_x  = base_x + 105
-    base_y = batt_y - 4
+    base_y = y + 6
 
     entries = [
         ("", "Leistung", power_w),          # Batterie (+ Entladen, - Laden)
