@@ -10,6 +10,7 @@ import re
 ECO_DEBUG = bool(int(os.getenv("ECO_DEBUG", "0")))
 PV_PAT = re.compile(r"(pv|solar|yield|gen|power|input|watt|energy)", re.I)
 DUMP_DIR = "/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_dump"
+ECOFLOW_SOLAR_ENERGY_CODE = "BK621_SOLAR-ENERGY-GENERATION"
 
 # Zeitzone
 try:
@@ -285,7 +286,7 @@ def _pv_series_from_db(slots_dt):
 
 def _pv_series_from_ecoflow_history(slots_dt):
     """
-    Nutzt die EcoFlow-API (/device/quota/power), um die heutige PV-Kurve
+    Nutzt die EcoFlow-API (/device/quota/data), um die heutige PV-Kurve
     des Wechselrichters als 15-Minuten-Reihe aufzulösen. Wird nur genutzt,
     wenn keine lokalen DB-Daten verfügbar sind.
     """
@@ -302,20 +303,13 @@ def _pv_series_from_ecoflow_history(slots_dt):
         return None
 
     history_series = None
+    begin_local = dt.datetime.combine(target_date, dt.time.min, tzinfo=LOCAL_TZ)
+    end_local = dt.datetime.combine(target_date, dt.time.max, tzinfo=LOCAL_TZ)
+
     for sn in sn_candidates:
         try:
-            sn_effective = ecoflow_get_main_sn(sn) or sn
-        except Exception as e:
-            logging.info("EcoFlow main-sn lookup (history) failed: %s", e)
-            sn_effective = sn
-
-        try:
-            hist = ecoflow_pv_history(sn_effective)
+            hist = ecoflow_quota_data(sn, begin_local, end_local, ECOFLOW_SOLAR_ENERGY_CODE)
             if hist is None or hist.empty:
-                continue
-            # Nur verwenden, wenn der Tag zur gewünschten Slots-Date passt
-            hist_dates = set(ts.date() for ts in hist.index)
-            if target_date not in hist_dates:
                 continue
 
             hist = hist.sort_index()
@@ -327,7 +321,7 @@ def _pv_series_from_ecoflow_history(slots_dt):
             history_series = pd.Series(values, index=slots_dt)
             logging.info(
                 "Nutze EcoFlow PV-Verlaufsdaten für SN %s (%d Punkte)",
-                sn_effective,
+                sn,
                 len(history_series),
             )
             break
@@ -752,102 +746,135 @@ def ecoflow_get_quota_selected_get(sn, quotas: list[str]) -> dict:
     raise RuntimeError(f"EcoFlow selected quota(GET) fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
 
 
-def ecoflow_quota_data(sn_main, beginTime_utc, endTime_utc, code):
+def _parse_ecoflow_quota_data_payload(j):
+    if not isinstance(j, dict):
+        return None
+    data = j.get("data")
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        if isinstance(data.get("data"), list):
+            return data.get("data")
+        if isinstance(data.get("list"), list):
+            return data.get("list")
+    return None
+
+
+def _coerce_timestamp(ts_raw):
+    if ts_raw is None:
+        return None
+    try:
+        if isinstance(ts_raw, (int, float)) or str(ts_raw).isdigit():
+            ts_int = int(float(ts_raw))
+            if ts_int > 1e12:  # ms
+                ts_dt = dt.datetime.fromtimestamp(ts_int / 1000.0, tz=dt.timezone.utc)
+            else:
+                ts_dt = dt.datetime.fromtimestamp(ts_int, tz=dt.timezone.utc)
+            return ts_dt.astimezone(LOCAL_TZ)
+        ts_str = str(ts_raw).replace("T", " ").strip()
+        ts_dt = dt.datetime.fromisoformat(ts_str)
+        if ts_dt.tzinfo is None:
+            ts_dt = ts_dt.replace(tzinfo=dt.timezone.utc)
+        return ts_dt.astimezone(LOCAL_TZ)
+    except Exception:
+        return None
+
+
+def ecoflow_quota_data(sn_any, begin_dt_local, end_dt_local, code):
     base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
-    path = "/iot-open/sign/device/quota/data"
-    query = {"sn": sn_main}
+    path_main = "/iot-open/sign/device/system/main/sn"
+    try:
+        hdr_main = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, {"sn": sn_any})
+        url_main = f"{base}{path_main}?{urlencode({'sn': sn_any})}"
+        r_main = requests.get(url_main, headers=hdr_main, timeout=12)
+        j_main = r_main.json()
+        main_sn = safe_get(j_main, "data", default=None)
+        if isinstance(main_sn, dict):
+            main_sn = main_sn.get("sn") or main_sn.get("mainSn") or main_sn.get("deviceSn")
+        elif not isinstance(main_sn, str):
+            main_sn = None
+    except Exception:
+        main_sn = None
+    if not main_sn:
+        main_sn = sn_any
+
+    def _ensure_local(dt_like):
+        if dt_like.tzinfo is None:
+            return dt_like.replace(tzinfo=LOCAL_TZ)
+        return dt_like.astimezone(LOCAL_TZ)
+
+    begin_local = _ensure_local(begin_dt_local)
+    end_local = _ensure_local(end_dt_local)
+    begin_utc = begin_local.astimezone(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    end_utc = end_local.astimezone(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
     body = {
-        "sn": sn_main,
+        "sn": main_sn,
         "params": {
-            "beginTime": beginTime_utc,
-            "endTime": endTime_utc,
+            "beginTime": begin_utc,
+            "endTime": end_utc,
             "code": code,
         },
     }
-    hdr = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, body, content_type="application/json")
-    url = f"{base}{path}?{urlencode(query)}"
+    hdr = _signed_headers(
+        api_key.ECOFLOW_APP_KEY,
+        api_key.ECOFLOW_SECRET_KEY,
+        body,
+        content_type="application/json;charset=UTF-8",
+    )
+    url = f"{base}/iot-open/sign/device/quota/data"
     r = requests.post(url, headers=hdr, json=body, timeout=15)
     try:
         j = r.json()
     except Exception:
         j = {"raw": r.text}
 
-    data = j.get("data") if isinstance(j, dict) else None
-    count = len(data) if isinstance(data, list) else 0
-    unit = None
-    try:
-        if data and isinstance(data[0], dict):
-            unit = data[0].get("unit")
-    except Exception:
-        pass
-    logging.info(
-        "EcoFlow quota/data code=%s count=%s unit=%s",
-        code,
-        count,
-        unit,
-    )
-    if r.status_code == 200 and str(j.get("code")) == "0" and isinstance(data, list):
-        return data
-    return None
-
-def ecoflow_pv_history(sn):
-    """
-    Holt die heutige PV-Verlaufsreihe (15-min/5-min) direkt vom EcoFlow BKW.
-    Laut BKW-Doku liefert /iot-open/sign/device/quota/power eine Zeitreihe mit
-    PV-Leistungswerten. Wir parsen flexibel, um unterschiedliche Feldnamen
-    ("pvPower", "power", "value") und Timestamps (Sek./ms) zu unterstützen.
-    """
-    base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
-    path = "/iot-open/sign/device/quota/power"
-    query = {"sn": sn}
-    hdr = _signed_headers(api_key.ECOFLOW_APP_KEY, api_key.ECOFLOW_SECRET_KEY, query, content_type=None)
-    url = f"{base}{path}?{urlencode(query)}"
-    r = requests.get(url, headers=hdr, timeout=12)
-    try:
-        j = r.json()
-    except Exception:
-        j = {"raw": r.text}
-
-    if not (r.status_code == 200 and str(j.get("code")) == "0"):
-        raise RuntimeError(f"PV history fehlgeschlagen: HTTP {r.status_code}, resp={str(j)[:200]}")
-
-    data = j.get("data") or []
+    entries = _parse_ecoflow_quota_data_payload(j) or []
     points = []
-    for entry in data:
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
-        ts_raw = entry.get("timestamp") or entry.get("time") or entry.get("ts")
-        if ts_raw is None:
-            continue
-        try:
-            ts_raw = int(ts_raw)
-            if ts_raw > 1e12:  # ms
-                ts_dt = dt.datetime.fromtimestamp(ts_raw / 1000.0, tz=dt.timezone.utc)
-            else:
-                ts_dt = dt.datetime.fromtimestamp(ts_raw, tz=dt.timezone.utc)
-            ts_dt = ts_dt.astimezone(LOCAL_TZ)
-        except Exception:
-            continue
-
-        power = (
-            _to_float(entry.get("pvPower"))
-            or _to_float(entry.get("power"))
-            or _to_float(entry.get("value"))
-            or _to_float(entry.get("pv"))
+        ts_dt = _coerce_timestamp(
+            entry.get("timestamp")
+            or entry.get("time")
+            or entry.get("ts")
+            or entry.get("timeStamp")
+            or entry.get("dateTime")
+            or entry.get("datetime")
         )
-        if power is None:
+        if ts_dt is None:
             continue
-        points.append((ts_dt, float(power)))
+        val = (
+            _to_float(entry.get("value"))
+            or _to_float(entry.get("power"))
+            or _to_float(entry.get("pvPower"))
+            or _to_float(entry.get("data"))
+            or _to_float(entry.get("val"))
+            or _to_float(entry.get("energy"))
+        )
+        if val is None:
+            continue
+        points.append((ts_dt, float(val)))
 
     if not points:
-        raise RuntimeError("PV history leer")
+        logging.warning("WARNING: quota/data returned empty")
+        return pd.Series(dtype=float)
 
-    points.sort(key=lambda p: p[0])
-    df = pd.DataFrame(points, columns=["ts", "pv_w"])
+    df = pd.DataFrame(points, columns=["ts", "value"])
     df.set_index("ts", inplace=True)
-    # Die API liefert typischerweise 5-Minuten-Slots. Wir glätten auf 15T und füllen.
+    df.sort_index(inplace=True)
     df = df.resample("15T").mean().ffill()
-    return df["pv_w"]
+    series = df["value"]
+
+    logging.info(
+        "EcoFlow quota/data main_sn=%s code=%s points=%s first=%s last=%s",
+        main_sn,
+        code,
+        len(series),
+        series.index.min(),
+        series.index.max(),
+    )
+    return series
 
 def ecoflow_status_bkw():
     """
