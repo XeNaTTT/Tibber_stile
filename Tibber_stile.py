@@ -261,7 +261,7 @@ def series_from_db(table, column, slots_dt, max_age_hours=48):
     for t in slots_dt:
         v = df[column].asof(t) if not df.empty else 0.0
         out.append(float(0.0 if pd.isna(v) else v))
-    return pd.Series(out)
+    return pd.Series(out, index=slots_dt)
 
 def _pv_series_from_db(slots_dt):
     """Versucht historische PV-Daten aus bekannten Tabellen/Spalten zu lesen."""
@@ -324,7 +324,7 @@ def _pv_series_from_ecoflow_history(slots_dt):
                 v = hist.asof(ts) if not hist.empty else None
                 values.append(float(0.0 if v is None or pd.isna(v) else v))
 
-            history_series = pd.Series(values)
+            history_series = pd.Series(values, index=slots_dt)
             logging.info(
                 "Nutze EcoFlow PV-Verlaufsdaten für SN %s (%d Punkte)",
                 sn_effective,
@@ -347,11 +347,11 @@ def get_pv_series(slots_dt, eco=None):
         from_db = _pv_series_from_db(slots_dt)
         if from_db is not None:
             logging.info("Nutze historische PV-Daten aus der lokalen DB")
-            return from_db
+            return _mask_future(from_db)
 
         from_history = _pv_series_from_ecoflow_history(slots_dt)
         if from_history is not None:
-            return from_history
+            return _mask_future(from_history)
 
         if eco is None:
             eco = ecoflow_status_bkw()
@@ -359,10 +359,20 @@ def get_pv_series(slots_dt, eco=None):
         pv_watt = float(pv_watt or 0.0)
         if ECO_DEBUG:
             logging.info(f"EcoFlow PV aktuell: {pv_watt} W")
-        return pd.Series([pv_watt] * len(slots_dt))
+        return _mask_future(pd.Series([pv_watt] * len(slots_dt), index=slots_dt))
     except Exception as e:
         logging.error(f"PV aus EcoFlow fehlgeschlagen: {e}")
-        return pd.Series([0.0] * len(slots_dt))
+        return _mask_future(pd.Series([0.0] * len(slots_dt), index=slots_dt))
+
+
+def _mask_future(series):
+    """Setzt zukünftige Slots auf NaN, damit keine flache Linie bis Mitternacht gezeichnet wird."""
+    if series is None or series.empty or not isinstance(series.index, pd.DatetimeIndex):
+        return series
+    now = dt.datetime.now(tz=LOCAL_TZ)
+    masked = series.copy()
+    masked[masked.index > now] = np.nan
+    return masked
 
 
 def get_consumption_series(slots_dt):
@@ -1229,16 +1239,28 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
             d.line((x2,y1, x2,y2), fill=0, width=2)
         # PV (historische Linie)
         if pv_list is not None and n == len(pv_list):
-            for i in range(n-1):
-                y1 = Y1 - pv_list.iloc[i]*sy_pow
-                y2 = Y1 - pv_list.iloc[i+1]*sy_pow
-                d.line((xs[i], y1, xs[i+1], y2), fill=0, width=1)
+            last_pt = None
+            for i in range(n):
+                if pd.isna(pv_list.iloc[i]):
+                    last_pt = None
+                    continue
+                x = xs[i]
+                y = Y1 - pv_list.iloc[i]*sy_pow
+                if last_pt is not None:
+                    d.line((last_pt[0], last_pt[1], x, y), fill=0, width=1)
+                last_pt = (x, y)
         # Verbrauch
         if cons_list is not None and n == len(cons_list):
-            for i in range(n-1):
-                y1 = Y1 - cons_list.iloc[i]*sy_pow
-                y2 = Y1 - cons_list.iloc[i+1]*sy_pow
-                draw_dashed_line(d, xs[i], y1, xs[i+1], y2, dash=4, gap=3, width=1)
+            last_pt = None
+            for i in range(n):
+                if pd.isna(cons_list.iloc[i]):
+                    last_pt = None
+                    continue
+                x = xs[i]
+                y = Y1 - cons_list.iloc[i]*sy_pow
+                if last_pt is not None:
+                    draw_dashed_line(d, last_pt[0], last_pt[1], x, y, dash=4, gap=3, width=1)
+                last_pt = (x, y)
         # Min/Max Labels
         vmin_i, vmax_i = val_list.index(min(val_list)), val_list.index(max(val_list))
         for idx in (vmin_i, vmax_i):
