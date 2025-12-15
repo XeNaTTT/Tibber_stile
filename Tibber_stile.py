@@ -283,6 +283,61 @@ def _pv_series_from_db(slots_dt):
     return None
 
 
+def _pv_series_from_ecoflow_history(slots_dt):
+    """
+    Nutzt die EcoFlow-API (/device/quota/power), um die heutige PV-Kurve
+    des Wechselrichters als 15-Minuten-Reihe aufzulösen. Wird nur genutzt,
+    wenn keine lokalen DB-Daten verfügbar sind.
+    """
+    if not slots_dt:
+        return None
+
+    target_date = slots_dt[0].date()
+    sn_candidates = [
+        getattr(api_key, "ECOFLOW_DEVICE_ID", "").strip(),
+        getattr(api_key, "ECOFLOW_MIKRO_ID", "").strip(),
+    ]
+    sn_candidates = [sn for sn in sn_candidates if sn]
+    if not sn_candidates:
+        return None
+
+    history_series = None
+    for sn in sn_candidates:
+        try:
+            sn_effective = ecoflow_get_main_sn(sn) or sn
+        except Exception as e:
+            logging.info("EcoFlow main-sn lookup (history) failed: %s", e)
+            sn_effective = sn
+
+        try:
+            hist = ecoflow_pv_history(sn_effective)
+            if hist is None or hist.empty:
+                continue
+            # Nur verwenden, wenn der Tag zur gewünschten Slots-Date passt
+            hist_dates = set(ts.date() for ts in hist.index)
+            if target_date not in hist_dates:
+                continue
+
+            hist = hist.sort_index()
+            values = []
+            for ts in slots_dt:
+                v = hist.asof(ts) if not hist.empty else None
+                values.append(float(0.0 if v is None or pd.isna(v) else v))
+
+            history_series = pd.Series(values)
+            logging.info(
+                "Nutze EcoFlow PV-Verlaufsdaten für SN %s (%d Punkte)",
+                sn_effective,
+                len(history_series),
+            )
+            break
+        except Exception as e:
+            logging.error("EcoFlow PV history fehlgeschlagen für %s: %s", sn, e)
+            continue
+
+    return history_series
+
+
 def get_pv_series(slots_dt, eco=None):
     """
     Holt historische PV-Daten aus der lokalen DB (falls vorhanden) und fällt
@@ -293,6 +348,10 @@ def get_pv_series(slots_dt, eco=None):
         if from_db is not None:
             logging.info("Nutze historische PV-Daten aus der lokalen DB")
             return from_db
+
+        from_history = _pv_series_from_ecoflow_history(slots_dt)
+        if from_history is not None:
+            return from_history
 
         if eco is None:
             eco = ecoflow_status_bkw()
