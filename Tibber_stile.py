@@ -10,7 +10,8 @@ import re
 ECO_DEBUG = bool(int(os.getenv("ECO_DEBUG", "0")))
 PV_PAT = re.compile(r"(pv|solar|yield|gen|power|input|watt|energy)", re.I)
 DUMP_DIR = "/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_dump"
-ECOFLOW_SOLAR_ENERGY_CODE = "BK621_SOLAR-ENERGY-GENERATION"
+# Solar-Historie laut EcoFlow-Doku (PV-Linie)
+ECOFLOW_SOLAR_ENERGY_CODE = "BK621-App-HOME-SOLAR-ENERGY-FLOW-solor-line-NOTDISTINGUISH-MASTER_DATA"
 
 # Zeitzone
 try:
@@ -850,6 +851,7 @@ def ecoflow_quota_data(sn_any, begin_dt_local, end_dt_local, code):
             or _to_float(entry.get("pvPower"))
             or _to_float(entry.get("data"))
             or _to_float(entry.get("val"))
+            or _to_float(entry.get("indexValue"))
             or _to_float(entry.get("energy"))
         )
         if val is None:
