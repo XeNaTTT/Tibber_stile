@@ -296,8 +296,8 @@ def _pv_series_from_ecoflow_history(slots_dt):
 
     target_date = slots_dt[0].date()
     sn_candidates = [
-        getattr(api_key, "ECOFLOW_DEVICE_ID", "").strip(),
         getattr(api_key, "ECOFLOW_MIKRO_ID", "").strip(),
+        getattr(api_key, "ECOFLOW_DEVICE_ID", "").strip(),
     ]
     sn_candidates = [sn for sn in sn_candidates if sn]
     if not sn_candidates:
@@ -873,7 +873,8 @@ def ecoflow_quota_data(sn_any, begin_dt_local, end_dt_local, code):
         if len(diffs) >= 3:
             non_neg_frac = float((diffs >= 0).mean())
             if series.max() > 100 and non_neg_frac >= 0.7:
-                series = series.diff().fillna(0).clip(lower=0) * 4
+                power = series.diff().fillna(0).clip(lower=0) * 4.0
+                series = power
                 logging.info("EcoFlow quota/data als kumulative Energie erkannt -> in Leistung umgerechnet")
     except Exception:
         pass
@@ -1064,16 +1065,21 @@ def ecoflow_status_bkw():
             return None
         v1, c1 = num(q, "pv1InputVolt"), num(q, "pv1InputCur")
         v2, c2 = num(q, "pv2InputVolt"), num(q, "pv2InputCur")
-        total = 0.0
-        have = False
-        if v1 is not None and c1 is not None:
-            total += (v1 * c1) / 100.0
-            have = True
-        if v2 is not None and c2 is not None:
-            total += (v2 * c2) / 100.0
-            have = True
-        if not have or total <= 0:
+
+        def _p(v, c):
+            if v is None or c is None:
+                return 0.0
+            p = (float(v) * float(c)) / 100.0
+            if p < 0:
+                return 0.0
+            return p
+
+        total = _p(v1, c1) + _p(v2, c2)
+        if total <= 0:
             return None
+        if total > 3000:
+            logging.info("PV Micro-Ausreißer erkannt (%.1f W) -> clamp", total)
+            total = 3000.0
         return total
 
     # Kerngrößen
@@ -1212,7 +1218,7 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
 
     # Klarere Zuordnung: Batterie-/Systemleistung, PV-Eingang, Netz, Haushaltslast
     power_w = st.get('power_w') or st.get('gridConnectionPower')
-    pv_w    = st.get('pv_input_w_sum') or st.get('powGetPvSum')
+    pv_w    = st.get('pv_input_w_sum')
     grid_w  = st.get('grid_w') or st.get('powGetSysGrid') or st.get('gridConnectionPower')
     load_w  = st.get('load_w') or st.get('powGetSysLoad')
 
