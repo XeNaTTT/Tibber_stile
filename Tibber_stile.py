@@ -350,7 +350,7 @@ def get_pv_series(slots_dt, eco=None):
 
         if eco is None:
             eco = ecoflow_status_bkw()
-        pv_watt = eco.get("pv_input_w_sum") or eco.get("pv_w")
+        pv_watt = eco.get("pv_input_w_sum") if isinstance(eco, dict) else None
         pv_watt = float(pv_watt or 0.0)
         if ECO_DEBUG:
             logging.info(f"EcoFlow PV aktuell: {pv_watt} W")
@@ -868,6 +868,16 @@ def ecoflow_quota_data(sn_any, begin_dt_local, end_dt_local, code):
     df = df.resample("15T").mean().ffill()
     series = df["value"]
 
+    try:
+        diffs = series.diff().dropna()
+        if len(diffs) >= 3:
+            non_neg_frac = float((diffs >= 0).mean())
+            if series.max() > 100 and non_neg_frac >= 0.7:
+                series = series.diff().fillna(0).clip(lower=0) * 4
+                logging.info("EcoFlow quota/data als kumulative Energie erkannt -> in Leistung umgerechnet")
+    except Exception:
+        pass
+
     logging.info(
         "EcoFlow quota/data main_sn=%s code=%s points=%s first=%s last=%s",
         main_sn,
@@ -961,6 +971,7 @@ def ecoflow_status_bkw():
 
     q_main, q_pv = {}, {}
     main_status = None
+    micro_status = None
     try:
         if sn_main_effective:
             if ECO_DEBUG:
@@ -975,12 +986,25 @@ def ecoflow_status_bkw():
                     sn_main_effective,
                 )
             try:
-                with open("/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_quota_last.json", "w") as f:
-                    json.dump(q_main, f, indent=2)
+                if sn_micro and sn_micro != sn_main_effective:
+                    if ECO_DEBUG:
+                        q_pv, micro_status = ecoflow_get_all_quota(sn_micro, with_status=True)
+                    else:
+                        q_pv = ecoflow_get_all_quota(sn_micro)
+                        micro_status = "quota/all"
+                    logging.info(
+                        "EcoFlow quota (%s) für Mikro %s",
+                        micro_status or "?",
+                        sn_micro,
+                    )
+            except Exception as e:
+                logging.info("EcoFlow quota/all für Mikro fehlgeschlagen: %s", e)
+            try:
+                if ECO_DEBUG:
+                    with open("/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_quota_last.json", "w") as f:
+                        json.dump({"main": q_main, "micro": q_pv}, f, indent=2)
             except Exception:
                 pass
-        if sn_micro and ECO_DEBUG and sn_micro != sn_main_effective:
-            logging.info("EcoFlow quota/all for micro skipped by default")
     except Exception as e:
         logging.error("EcoFlow quota/all fehlgeschlagen: %s", e)
         if os.path.exists(ECOFLOW_FALLBACK):
@@ -1035,7 +1059,22 @@ def ecoflow_status_bkw():
         fv = _to_float(v)
         return fv if fv is not None else default
 
-    pv_src = q_pv or q_main
+    def pv_from_micro(q):
+        if not isinstance(q, dict):
+            return None
+        v1, c1 = num(q, "pv1InputVolt"), num(q, "pv1InputCur")
+        v2, c2 = num(q, "pv2InputVolt"), num(q, "pv2InputCur")
+        total = 0.0
+        have = False
+        if v1 is not None and c1 is not None:
+            total += (v1 * c1) / 100.0
+            have = True
+        if v2 is not None and c2 is not None:
+            total += (v2 * c2) / 100.0
+            have = True
+        if not have or total <= 0:
+            return None
+        return total
 
     # Kerngrößen
     soc     = num(q_main, "cmsBattSoc")
@@ -1043,11 +1082,16 @@ def ecoflow_status_bkw():
         try: soc = int(round(soc))
         except: pass
 
-    pv_sum  = num(pv_src, "powGetPvSum")
-    if pv_sum is None:
-        pv_sum = num(pv_src, "powGetPv1InputW", default=None)
-        if pv_sum is not None:
-            pv_sum += num(pv_src, "powGetPv2InputW", default=0.0)
+    pv_sum  = pv_from_micro(q_pv)
+    if pv_sum is not None:
+        logging.info("PV-Leistung aus Micro-Quotas genutzt: %.1f W", pv_sum)
+    else:
+        pv_sum = num(q_main, "powGetPvSum")
+        if pv_sum is None:
+            pv_sum = num(q_main, "powGetPv1InputW", default=None)
+            if pv_sum is not None:
+                pv_sum += num(q_main, "powGetPv2InputW", default=0.0)
+        logging.info("PV-Leistung aus Batterie/System-Quotas genutzt: %s", pv_sum if pv_sum is not None else "None")
     load_w  = num(q_main, "powGetSysLoad")
     grid_w  = num(q_main, "powGetSysGrid")
     if grid_w is None:
