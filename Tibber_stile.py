@@ -12,6 +12,9 @@ PV_PAT = re.compile(r"(pv|solar|yield|gen|power|input|watt|energy)", re.I)
 DUMP_DIR = "/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_dump"
 # Solar-Historie laut EcoFlow-Doku (PV-Linie)
 ECOFLOW_SOLAR_ENERGY_CODE = "BK621-App-HOME-SOLAR-ENERGY-FLOW-solor-line-NOTDISTINGUISH-MASTER_DATA"
+ECOFLOW_PV1_CODE = "<PV1 code>"
+ECOFLOW_PV2_CODE = "<PV2 code>"
+ECOFLOW_PV_TOTAL_CODE = None
 
 # Zeitzone
 try:
@@ -372,6 +375,70 @@ def _mask_future(series):
 
 def get_consumption_series(slots_dt):
     return series_from_db("consumption_log", "consumption_w", slots_dt)
+
+_PV_LOGGED = False
+
+def get_pv_series_micro(slots_dt, micro_sn, code, kind="auto"):
+    if not slots_dt or not micro_sn or not code:
+        return _mask_future(pd.Series([0.0] * len(slots_dt), index=slots_dt))
+    target_date = slots_dt[0].date()
+    begin_local = dt.datetime.combine(target_date, dt.time.min, tzinfo=LOCAL_TZ)
+    end_local = dt.datetime.combine(target_date, dt.time.max, tzinfo=LOCAL_TZ)
+    hist = ecoflow_quota_data(micro_sn, begin_local, end_local, code, expected_kind=kind)
+    values = []
+    now = dt.datetime.now(tz=LOCAL_TZ)
+    for ts in slots_dt:
+        if ts > now:
+            values.append(np.nan)
+            continue
+        v = hist.asof(ts) if hist is not None and not hist.empty else None
+        values.append(float(0.0 if v is None or pd.isna(v) else v))
+    series = pd.Series(values, index=slots_dt)
+    series.attrs["energy_to_power"] = bool(hist.attrs.get("energy_to_power")) if hist is not None else False
+    return _mask_future(series)
+
+
+def get_pv_series_multi_micro(slots_dt):
+    global _PV_LOGGED
+    micro_sn = getattr(api_key, "ECOFLOW_MIKRO_ID", "").strip()
+    pv1 = get_pv_series_micro(slots_dt, micro_sn, ECOFLOW_PV1_CODE, kind="auto")
+    pv2 = get_pv_series_micro(slots_dt, micro_sn, ECOFLOW_PV2_CODE, kind="auto")
+
+    pv_sum = None
+    if ECOFLOW_PV_TOTAL_CODE:
+        pv_sum = get_pv_series_micro(slots_dt, micro_sn, ECOFLOW_PV_TOTAL_CODE, kind="auto")
+        if pv_sum is None or pv_sum.empty:
+            pv_sum = None
+
+    if pv_sum is None:
+        pv_sum = pv1.add(pv2, fill_value=0.0)
+        mask = pv1.isna() & pv2.isna()
+        pv_sum[mask] = np.nan
+
+    pv_sum = _mask_future(pv_sum)
+
+    if not _PV_LOGGED:
+        _PV_LOGGED = True
+        logging.info(
+            "PV Codes (Micro): PV1=%s PV2=%s PV_TOTAL=%s",
+            ECOFLOW_PV1_CODE,
+            ECOFLOW_PV2_CODE,
+            ECOFLOW_PV_TOTAL_CODE or "-",
+        )
+        logging.info(
+            "PV Serienpunkte: pv1=%d pv2=%d pv_sum=%d",
+            len(pv1) if pv1 is not None else 0,
+            len(pv2) if pv2 is not None else 0,
+            len(pv_sum) if pv_sum is not None else 0,
+        )
+        logging.info(
+            "PV energy->power triggered: pv1=%s pv2=%s pv_sum=%s",
+            bool(pv1.attrs.get("energy_to_power")) if pv1 is not None else False,
+            bool(pv2.attrs.get("energy_to_power")) if pv2 is not None else False,
+            bool(pv_sum.attrs.get("energy_to_power")) if pv_sum is not None else False,
+        )
+
+    return pv1, pv2, pv_sum
 
 # ---------- Tibber Consumption (hourly -> 15min) ----------
 def tibber_hourly_consumption(last=48):
@@ -781,7 +848,10 @@ def _coerce_timestamp(ts_raw):
         return None
 
 
-def ecoflow_quota_data(sn_any, begin_dt_local, end_dt_local, code):
+def ecoflow_quota_data(sn_any, begin_dt_local, end_dt_local, code, expected_kind="auto"):
+    if not code:
+        logging.warning("EcoFlow quota/data: code fehlt -> leere Serie")
+        return pd.Series(dtype=float)
     base = getattr(api_key, "ECOFLOW_HOST", "https://api-e.ecoflow.com").rstrip("/")
     path_main = "/iot-open/sign/device/system/main/sn"
     try:
@@ -867,25 +937,37 @@ def ecoflow_quota_data(sn_any, begin_dt_local, end_dt_local, code):
     df.sort_index(inplace=True)
     df = df.resample("15T").mean().ffill()
     series = df["value"]
+    energy_to_power = False
 
-    try:
-        diffs = series.diff().dropna()
-        if len(diffs) >= 3:
-            non_neg_frac = float((diffs >= 0).mean())
-            if series.max() > 100 and non_neg_frac >= 0.7:
-                power = series.diff().fillna(0).clip(lower=0) * 4.0
-                series = power
-                logging.info("EcoFlow quota/data als kumulative Energie erkannt -> in Leistung umgerechnet")
-    except Exception:
-        pass
+    def _to_power(s):
+        return s.diff().fillna(0).clip(lower=0) * 4.0
+
+    if expected_kind == "energy":
+        series = _to_power(series)
+        energy_to_power = True
+    elif expected_kind == "power":
+        energy_to_power = False
+    else:
+        try:
+            diffs = series.diff().dropna()
+            if len(diffs) >= 3:
+                non_neg_frac = float((diffs >= 0).mean())
+                if series.max() > 100 and non_neg_frac >= 0.7:
+                    series = _to_power(series)
+                    energy_to_power = True
+        except Exception:
+            pass
+
+    series.attrs["energy_to_power"] = energy_to_power
 
     logging.info(
-        "EcoFlow quota/data main_sn=%s code=%s points=%s first=%s last=%s",
+        "EcoFlow quota/data main_sn=%s code=%s points=%s first=%s last=%s energy_to_power=%s",
         main_sn,
         code,
         len(series),
         series.index.min(),
         series.index.max(),
+        energy_to_power,
     )
     return series
 
@@ -1268,7 +1350,8 @@ def draw_info_box(d, info, fonts, y, width):
         d.text((x0 + i*colw, y), f"{k}: {v}", font=fonts['bold'], fill=0)
 
 def draw_two_day_chart(d, left, right, fonts, subtitles, area,
-                       pv_left=None, pv_right=None,
+                       pv1_left=None, pv2_left=None, pvs_left=None,
+                       pv1_right=None, pv2_right=None, pvs_right=None,
                        cons_left=None, cons_right=None,
                        cur_dt=None, cur_price=None):
     PRICE_MIN_CENT = 5
@@ -1293,7 +1376,9 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
         if series is None: return 0
         try: return float(np.nanmax(series)) if len(series)>0 else 0
         except: return 0
-    pmax = max(vmax_power(pv_left), vmax_power(pv_right),
+    pmax = max(vmax_power(pvs_left), vmax_power(pvs_right),
+               vmax_power(pv1_left), vmax_power(pv2_left),
+               vmax_power(pv1_right), vmax_power(pv2_right),
                vmax_power(cons_left), vmax_power(cons_right))
     sy_pow = H/((pmax or 1)*1.2)
 
@@ -1306,7 +1391,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
             d.text((X0-45, yy-7), f"{yv/100:.2f}", font=fonts['tiny'], fill=0)
         yv += step
 
-    def panel(ts_list, val_list, pv_list, cons_list, x0):
+    def panel(ts_list, val_list, pv1_list, pv2_list, pvs_list, cons_list, x0):
         n = len(ts_list)
         if n < 2: return
         xs = [x0 + i*(PW/(n-1)) for i in range(n)]
@@ -1316,17 +1401,41 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
             x2, y2 = xs[i+1], _price_to_y(val_list[i+1])
             d.line((x1,y1, x2,y1), fill=0, width=2)
             d.line((x2,y1, x2,y2), fill=0, width=2)
-        # PV (historische Linie)
-        if pv_list is not None and n == len(pv_list):
+        # PV1 (solid)
+        if pv1_list is not None and n == len(pv1_list):
             last_pt = None
             for i in range(n):
-                if pd.isna(pv_list.iloc[i]):
+                if pd.isna(pv1_list.iloc[i]):
                     last_pt = None
                     continue
                 x = xs[i]
-                y = Y1 - pv_list.iloc[i]*sy_pow
+                y = Y1 - pv1_list.iloc[i]*sy_pow
                 if last_pt is not None:
                     d.line((last_pt[0], last_pt[1], x, y), fill=0, width=1)
+                last_pt = (x, y)
+        # PV2 (dashed)
+        if pv2_list is not None and n == len(pv2_list):
+            last_pt = None
+            for i in range(n):
+                if pd.isna(pv2_list.iloc[i]):
+                    last_pt = None
+                    continue
+                x = xs[i]
+                y = Y1 - pv2_list.iloc[i]*sy_pow
+                if last_pt is not None:
+                    draw_dashed_line(d, last_pt[0], last_pt[1], x, y, dash=3, gap=2, width=1)
+                last_pt = (x, y)
+        # PV-Summe (solid, dicker)
+        if pvs_list is not None and n == len(pvs_list):
+            last_pt = None
+            for i in range(n):
+                if pd.isna(pvs_list.iloc[i]):
+                    last_pt = None
+                    continue
+                x = xs[i]
+                y = Y1 - pvs_list.iloc[i]*sy_pow
+                if last_pt is not None:
+                    d.line((last_pt[0], last_pt[1], x, y), fill=0, width=2)
                 last_pt = (x, y)
         # Verbrauch
         if cons_list is not None and n == len(cons_list):
@@ -1346,9 +1455,9 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
             xi, yi = xs[idx], _price_to_y(val_list[idx])
             d.text((xi-12, yi-12), f"{val_list[idx]/100:.2f}", font=fonts['tiny'], fill=0)
 
-    panel(tl, vl, pv_left,  cons_left,  X0)
+    panel(tl, vl, pv1_left, pv2_left, pvs_left, cons_left, X0)
     d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
-    panel(tr, vr, pv_right, cons_right, X0+PW)
+    panel(tr, vr, pv1_right, pv2_right, pvs_right, cons_right, X0+PW)
 
     # Subtitles unter Achse
     d.text((X0+5,    Y1+28), subtitles[0], font=fonts['bold'], fill=0)
@@ -1367,7 +1476,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     hour_ticks(tr, X0+PW)
 
     # Legende Leistung
-    d.text((X1-180, Y0-16), "-  Strompreis   ----  Verbrauch", font=fonts['tiny'], fill=0)
+    d.text((X1-260, Y0-16), "PV1 — PV2 - - PVΣ  ---- Verbrauch", font=fonts['tiny'], fill=0)
 
     # Minutengenauer Marker (horizontale Interpolation)
     if cur_price is not None:
@@ -1477,8 +1586,8 @@ def main():
     tl_dt, _ = slots_to_15min(left)
     tr_dt, _ = slots_to_15min(right)
 
-    pv_left  = get_pv_series(tl_dt, eco=eco)
-    pv_right = get_pv_series(tr_dt, eco=eco)
+    pv1_left, pv2_left, pvs_left = get_pv_series_multi_micro(tl_dt)
+    pv1_right, pv2_right, pvs_right = get_pv_series_multi_micro(tr_dt)
 
     hourly = tibber_hourly_consumption(last=48)
     if hourly:
@@ -1528,7 +1637,8 @@ def main():
 
     draw_two_day_chart(
         d, left, right, fonts, labels, chart_area,
-        pv_left=pv_left, pv_right=pv_right,
+        pv1_left=pv1_left, pv2_left=pv2_left, pvs_left=pvs_left,
+        pv1_right=pv1_right, pv2_right=pv2_right, pvs_right=pvs_right,
         cons_left=cons_left, cons_right=cons_right,
         cur_dt=info['current_dt'], cur_price=info['current_price']
     )
