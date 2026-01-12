@@ -494,46 +494,27 @@ def get_pv_series_multi_micro(slots_dt):
 # ---------- Tibber Consumption (hourly -> 15min) ----------
 def tibber_hourly_consumption(last=48):
     hdr = {"Authorization": f"Bearer {api_key.API_KEY}", "Content-Type": "application/json"}
-    q = (
-        "{ viewer { homes { "
-        f"consumption(resolution: HOURLY, last: {last}) "
-        "{ nodes { from consumption } } "
-        "} } }"
-    )
-    r = requests.post(
-        "https://api.tibber.com/v1-beta/gql",
-        json={"query": q},
-        headers=hdr,
-        timeout=15,
-    )
+    q = f"""
+    {{ viewer {{ homes {{
+      consumption(resolution: HOURLY, last: {last}) {{
+        nodes {{ from consumption }}
+      }}
+    }}}} }}
+    """
+    r = requests.post("https://api.tibber.com/v1-beta/gql", json={"query": q}, headers=hdr, timeout=15)
     r.raise_for_status()
     j = r.json()
-    if isinstance(j, dict) and j.get("errors"):
-        raise RuntimeError(f"Tibber consumption GraphQL errors: {j['errors']}")
-    data = (j or {}).get("data") or {}
-    viewer = data.get("viewer") or {}
-    homes = viewer.get("homes") or []
-    if not homes:
-        logging.warning("Tibber consumption: keine Homes in Antwort")
-        return []
-    cons = homes[0].get("consumption") or {}
-    nodes = cons.get("nodes") or []
-    if not nodes:
-        logging.warning("Tibber consumption: keine Nodes in Antwort")
-        return []
+    nodes = j["data"]["viewer"]["homes"][0]["consumption"]["nodes"]
     out = []
     for n in nodes:
-        try:
-            f = dt.datetime.fromisoformat(n["from"]).astimezone(LOCAL_TZ)
-            out.append((f, float(n.get("consumption") or 0.0)))
-        except Exception:
-            continue
+        f = dt.datetime.fromisoformat(n["from"]).astimezone(LOCAL_TZ)
+        out.append((f, float(n["consumption"] or 0.0)))
     return out
 
 def upsample_hourly_to_quarter(ts_15min, hourly_list):
     import bisect
     if not hourly_list:
-        return pd.Series([np.nan] * len(ts_15min), index=ts_15min)
+        return pd.Series([0.0]*len(ts_15min))
     hours = [t for (t,_) in hourly_list]
     vals  = [v for (_,v) in hourly_list]  # kWh je Stunde
     first_ts, last_ts = hours[0], hours[-1]
