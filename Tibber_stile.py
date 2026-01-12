@@ -485,46 +485,47 @@ def get_pv_series_multi_micro(slots_dt):
 
 # ---------- Tibber Consumption (hourly -> 15min) ----------
 def tibber_hourly_consumption(last=48):
-    hdr = {"Authorization": f"Bearer {api_key.API_KEY}", "Content-Type":"application/json"}
-    q = f"""
-    {{ viewer {{ homes {{
-      consumption(resolution: HOURLY, last: {last}) {{
-        nodes {{ from consumption }}
-      }}
-    }}}} }}
-    """
-    try:
-        r = requests.post("https://api.tibber.com/v1-beta/gql", json={"query": q}, headers=hdr, timeout=15)
-        r.raise_for_status()
-        j = r.json()
-        if isinstance(j, dict) and j.get("errors"):
-            logging.error("Tibber consumption GraphQL errors: %s", str(j["errors"])[:300])
-            return []
-        data = (j or {}).get("data") or {}
-        viewer = data.get("viewer") or {}
-        homes = viewer.get("homes") or []
-        home0 = homes[0] if homes else {}
-        cons = home0.get("consumption")
-        if cons is None or cons.get("nodes") is None:
-            logging.error("Tibber consumption missing nodes in response")
-            return []
-        nodes = cons.get("nodes") or []
-        out = []
-        for n in nodes:
-            try:
-                f = dt.datetime.fromisoformat(n["from"]).astimezone(LOCAL_TZ)
-                out.append((f, float(n.get("consumption") or 0.0)))
-            except Exception:
-                continue
-        return out
-    except Exception as e:
-        logging.error("Tibber consumption fetch failed: %s", e)
+    hdr = {"Authorization": f"Bearer {api_key.API_KEY}", "Content-Type": "application/json"}
+    q = (
+        "{ viewer { homes { "
+        f"consumption(resolution: HOURLY, last: {last}) "
+        "{ nodes { from consumption } } "
+        "} } }"
+    )
+    r = requests.post(
+        "https://api.tibber.com/v1-beta/gql",
+        json={"query": q},
+        headers=hdr,
+        timeout=15,
+    )
+    r.raise_for_status()
+    j = r.json()
+    if isinstance(j, dict) and j.get("errors"):
+        raise RuntimeError(f"Tibber consumption GraphQL errors: {j['errors']}")
+    data = (j or {}).get("data") or {}
+    viewer = data.get("viewer") or {}
+    homes = viewer.get("homes") or []
+    if not homes:
+        logging.warning("Tibber consumption: keine Homes in Antwort")
         return []
+    cons = homes[0].get("consumption") or {}
+    nodes = cons.get("nodes") or []
+    if not nodes:
+        logging.warning("Tibber consumption: keine Nodes in Antwort")
+        return []
+    out = []
+    for n in nodes:
+        try:
+            f = dt.datetime.fromisoformat(n["from"]).astimezone(LOCAL_TZ)
+            out.append((f, float(n.get("consumption") or 0.0)))
+        except Exception:
+            continue
+    return out
 
 def upsample_hourly_to_quarter(ts_15min, hourly_list):
     import bisect
     if not hourly_list:
-        return pd.Series([0.0]*len(ts_15min))
+        return pd.Series([np.nan] * len(ts_15min), index=ts_15min)
     hours = [t for (t,_) in hourly_list]
     vals  = [v for (_,v) in hourly_list]  # kWh je Stunde
     first_ts, last_ts = hours[0], hours[-1]
@@ -1703,7 +1704,11 @@ def main():
     pv1_left, pv2_left, pvs_left = get_pv_series_multi_micro(tl_dt)
     pv1_right, pv2_right, pvs_right = get_pv_series_multi_micro(tr_dt)
 
-    hourly = tibber_hourly_consumption(last=48)
+    try:
+        hourly = tibber_hourly_consumption(last=48)
+    except Exception as e:
+        logging.error("Tibber Verbrauchsdaten fehlgeschlagen: %s", e)
+        hourly = []
     if hourly:
         logging.info(
             "Tibber Verbrauchsdaten via API: letzte %d Stunden, Start=%s, Ende=%s",
@@ -1713,8 +1718,8 @@ def main():
         )
     else:
         logging.info("Keine Tibber-Verbrauchsdaten erhalten")
-    cons_left  = upsample_hourly_to_quarter(tl_dt, hourly) if hourly else pd.Series([0.0]*len(tl_dt), index=tl_dt)
-    cons_right = upsample_hourly_to_quarter(tr_dt, hourly) if hourly else pd.Series([0.0]*len(tr_dt), index=tr_dt)
+    cons_left = upsample_hourly_to_quarter(tl_dt, hourly)
+    cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
     sun_today, sun_tomorrow = sunshine_hours_both(api_key.LAT, api_key.LON)
     logging.info(
