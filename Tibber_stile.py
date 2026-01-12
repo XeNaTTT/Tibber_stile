@@ -291,15 +291,14 @@ def series_from_db(table, column, slots_dt, max_age_hours=48):
 
 def pv_series_from_db(slots_dt, column, db_file=DB_FILE):
     if not slots_dt:
-        logging.warning("PV DB leer für %s (%s)", "unbekannt", column)
-        return None
+        return pd.Series(dtype=float, index=slots_dt)
     if column not in ("pv1_w", "pv2_w", "pv_sum_w"):
         raise ValueError(f"PV DB column ungültig: {column}")
 
     start_local = min(slots_dt)
     end_local = max(slots_dt)
-    start_utc = int(start_local.astimezone(dt.timezone.utc).timestamp())
-    end_utc = int(end_local.astimezone(dt.timezone.utc).timestamp())
+    start_utc = int((start_local - dt.timedelta(hours=1)).astimezone(dt.timezone.utc).timestamp())
+    end_utc = int((end_local + dt.timedelta(hours=1)).astimezone(dt.timezone.utc).timestamp())
 
     conn = sqlite3.connect(db_file)
     try:
@@ -308,20 +307,19 @@ def pv_series_from_db(slots_dt, column, db_file=DB_FILE):
             conn,
             params=(start_utc, end_utc),
         )
-    except Exception:
+    except Exception as e:
         conn.close()
-        logging.warning("PV DB leer für %s (%s)", start_local.date().isoformat(), column)
-        return None
+        logging.warning("PV DB query failed (%s): %s", column, e)
+        return pd.Series([np.nan] * len(slots_dt), index=slots_dt)
     conn.close()
 
     if df.empty:
-        logging.warning("PV DB leer für %s (%s)", start_local.date().isoformat(), column)
-        return None
+        return pd.Series([np.nan] * len(slots_dt), index=slots_dt)
 
     df["ts"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(LOCAL_TZ)
     df.set_index("ts", inplace=True)
     df.sort_index(inplace=True)
-    df = df.resample("15T").mean().ffill().fillna(0)
+    df = df.resample("15T").mean()
 
     out = []
     for t in slots_dt:
@@ -330,66 +328,67 @@ def pv_series_from_db(slots_dt, column, db_file=DB_FILE):
     return pd.Series(out, index=slots_dt)
 
 
-def _pv_series_from_ecoflow_history(slots_dt):
-    """
-    Nutzt die EcoFlow-API (/device/quota/data), um die heutige PV-Kurve
-    des Wechselrichters als 15-Minuten-Reihe aufzulösen. Wird nur genutzt,
-    wenn keine lokalen DB-Daten verfügbar sind.
-    """
+def get_pv_series_db(slots_dt):
+    series_map = {
+        "pv1": pv_series_from_db(slots_dt, "pv1_w"),
+        "pv2": pv_series_from_db(slots_dt, "pv2_w"),
+        "pv_sum": pv_series_from_db(slots_dt, "pv_sum_w"),
+    }
+    for key, series in series_map.items():
+        if series is None or series.empty or not np.isfinite(series.to_numpy()).any():
+            series_map[key] = pd.Series([np.nan] * len(slots_dt), index=slots_dt)
+        else:
+            series_map[key] = _mask_future(series)
+    return series_map
+
+def pv_db_stats(slots_dt, label, db_file=DB_FILE):
     if not slots_dt:
-        return None
+        logging.info("PV DB empty for range; skipping PV lines")
+        return {"count": 0, "max_pv1": None, "max_pv2": None, "max_pv_sum": None}
 
-    target_date = slots_dt[0].date()
-    sn_candidates = [
-        getattr(api_key, "ECOFLOW_MIKRO_ID", "").strip(),
-        getattr(api_key, "ECOFLOW_DEVICE_ID", "").strip(),
-    ]
-    sn_candidates = [sn for sn in sn_candidates if sn]
-    if not sn_candidates:
-        return None
+    start_local = min(slots_dt)
+    end_local = max(slots_dt)
+    start_utc = int((start_local - dt.timedelta(hours=1)).astimezone(dt.timezone.utc).timestamp())
+    end_utc = int((end_local + dt.timedelta(hours=1)).astimezone(dt.timezone.utc).timestamp())
 
-    history_series = None
-    begin_local = dt.datetime.combine(target_date, dt.time.min, tzinfo=LOCAL_TZ)
-    end_local = dt.datetime.combine(target_date, dt.time.max, tzinfo=LOCAL_TZ)
-
-    for sn in sn_candidates:
-        try:
-            hist = ecoflow_quota_data(sn, begin_local, end_local, ECOFLOW_SOLAR_ENERGY_CODE)
-            if hist is None or hist.empty:
-                continue
-
-            hist = hist.sort_index()
-            values = []
-            for ts in slots_dt:
-                v = hist.asof(ts) if not hist.empty else None
-                values.append(float(0.0 if v is None or pd.isna(v) else v))
-
-            history_series = pd.Series(values, index=slots_dt)
-            logging.info(
-                "Nutze EcoFlow PV-Verlaufsdaten für SN %s (%d Punkte)",
-                sn,
-                len(history_series),
-            )
-            break
-        except Exception as e:
-            logging.error("EcoFlow PV history fehlgeschlagen für %s: %s", sn, e)
-            continue
-
-    return history_series
-
-
-def get_pv_series(slots_dt, column="pv_sum_w"):
-    """
-    Holt PV-Daten aus der lokalen DB; falls leer, wird eine NaN-Serie geliefert.
-    """
+    conn = sqlite3.connect(db_file)
     try:
-        from_db = pv_series_from_db(slots_dt, column)
-        if from_db is None:
-            return _mask_future(pd.Series([np.nan] * len(slots_dt), index=slots_dt))
-        return _mask_future(from_db)
+        row = conn.execute(
+            """
+            SELECT COUNT(*) as cnt,
+                   MAX(pv1_w) as max_pv1,
+                   MAX(pv2_w) as max_pv2,
+                   MAX(pv_sum_w) as max_pv_sum
+            FROM pv_log
+            WHERE ts BETWEEN ? AND ?
+            """,
+            (start_utc, end_utc),
+        ).fetchone()
     except Exception as e:
-        logging.error("PV DB fehlgeschlagen (%s): %s", column, e)
-        return _mask_future(pd.Series([np.nan] * len(slots_dt), index=slots_dt))
+        conn.close()
+        logging.warning("PV DB stats query failed (%s): %s", label, e)
+        return {"count": 0, "max_pv1": None, "max_pv2": None, "max_pv_sum": None}
+    conn.close()
+
+    count = int(row[0] or 0)
+    stats = {
+        "count": count,
+        "max_pv1": row[1],
+        "max_pv2": row[2],
+        "max_pv_sum": row[3],
+    }
+    if count == 0:
+        logging.info("PV DB empty for range; skipping PV lines")
+    else:
+        logging.info(
+            "PV DB rows %s: %d (max pv1=%s pv2=%s pv_sum=%s)",
+            label,
+            count,
+            stats["max_pv1"],
+            stats["max_pv2"],
+            stats["max_pv_sum"],
+        )
+    return stats
 
 
 def _mask_future(series):
@@ -1436,9 +1435,7 @@ def draw_info_box(d, info, fonts, y, width):
         d.text((x0 + i*colw, y), f"{k}: {v}", font=fonts['bold'], fill=0)
 
 def draw_two_day_chart(d, left, right, fonts, subtitles, area,
-                       pv_sum_left=None, pv_sum_right=None,
-                       pv1_left=None, pv1_right=None,
-                       pv2_left=None, pv2_right=None,
+                       pv_left=None, pv_right=None,
                        cons_left=None, cons_right=None,
                        cur_dt=None, cur_price=None):
     PRICE_MIN_CENT = 5
@@ -1463,14 +1460,22 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
         if series is None: return 0
         try: return float(np.nanmax(series)) if len(series)>0 else 0
         except: return 0
+    pv_left = pv_left or {}
+    pv_right = pv_right or {}
+    pv1_left = pv_left.get("pv1")
+    pv2_left = pv_left.get("pv2")
+    pv_sum_left = pv_left.get("pv_sum")
+    pv1_right = pv_right.get("pv1")
+    pv2_right = pv_right.get("pv2")
+    pv_sum_right = pv_right.get("pv_sum")
+
     pv_max = max(vmax_power(pv_sum_left), vmax_power(pv_sum_right),
                  vmax_power(pv1_left), vmax_power(pv2_left),
                  vmax_power(pv1_right), vmax_power(pv2_right))
     cons_max = max(vmax_power(cons_left), vmax_power(cons_right))
-    pv_scale_max = max(pv_max * 1.2, 1)
-    cons_scale_max = max(cons_max * 1.2, 1)
-    sy_pv = H / pv_scale_max
-    sy_cons = H / cons_scale_max
+    power_scale_max = max(max(pv_max, cons_max) * 1.2, 1)
+    sy_pv = H / power_scale_max
+    sy_cons = H / power_scale_max
 
     def _series_has_values(series):
         if series is None:
@@ -1504,7 +1509,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
             x2, y2 = xs[i+1], _price_to_y(val_list[i+1])
             d.line((x1,y1, x2,y1), fill=0, width=2)
             d.line((x2,y1, x2,y2), fill=0, width=2)
-        # PV1 (solid)
+        # PV1 (thin)
         if has_pv and pv1_list is not None and n == len(pv1_list):
             last_pt = None
             for i in range(n):
@@ -1516,7 +1521,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                 if last_pt is not None:
                     d.line((last_pt[0], last_pt[1], x, y), fill=0, width=1)
                 last_pt = (x, y)
-        # PV2 (dashed)
+        # PV2 (thin)
         if has_pv and pv2_list is not None and n == len(pv2_list):
             last_pt = None
             for i in range(n):
@@ -1526,7 +1531,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                 x = xs[i]
                 y = Y1 - pv2_list.iloc[i]*sy_pv
                 if last_pt is not None:
-                    draw_dashed_line(d, last_pt[0], last_pt[1], x, y, dash=3, gap=2, width=1)
+                    d.line((last_pt[0], last_pt[1], x, y), fill=0, width=1)
                 last_pt = (x, y)
         # PV-Summe (solid, dicker)
         if has_pv and pv_sum_list is not None and n == len(pv_sum_list):
@@ -1581,7 +1586,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     # Legende Leistung
     d.text((X1-300, Y0-16), "PV Summe — PV1 — PV2 - - Verbrauch   Strompreis", font=fonts['tiny'], fill=0)
     if not has_pv:
-        d.text((X0 + 6, Y0 + 6), "PV Historie nicht verfügbar (Micro offline/keine Daten)", font=fonts['tiny'], fill=0)
+        d.text((X0 + 6, Y0 + 6), "PV DB leer - keine PV-Linien", font=fonts['tiny'], fill=0)
 
     # Minutengenauer Marker (horizontale Interpolation)
     if cur_price is not None:
@@ -1691,27 +1696,11 @@ def main():
     tl_dt, _ = slots_to_15min(left)
     tr_dt, _ = slots_to_15min(right)
 
-    pv_sum_left = get_pv_series(tl_dt, column="pv_sum_w")
-    pv_sum_right = get_pv_series(tr_dt, column="pv_sum_w")
-    pv1_left = get_pv_series(tl_dt, column="pv1_w")
-    pv1_right = get_pv_series(tr_dt, column="pv1_w")
-    pv2_left = get_pv_series(tl_dt, column="pv2_w")
-    pv2_right = get_pv_series(tr_dt, column="pv2_w")
+    pv_db_stats(tl_dt, labels[0])
+    pv_db_stats(tr_dt, labels[1])
 
-    def _log_pv_db(label, column, series):
-        if series is None:
-            logging.warning("PV DB leer für %s (%s)", label, column)
-            return
-        points = len(series.dropna())
-        nonzero = int((series.fillna(0) > 0).sum())
-        logging.info("PV DB %s: %s points=%d (nonzero=%d)", label, column, points, nonzero)
-
-    _log_pv_db(labels[0], "pv_sum_w", pv_sum_left)
-    _log_pv_db(labels[1], "pv_sum_w", pv_sum_right)
-    _log_pv_db(labels[0], "pv1_w", pv1_left)
-    _log_pv_db(labels[1], "pv1_w", pv1_right)
-    _log_pv_db(labels[0], "pv2_w", pv2_left)
-    _log_pv_db(labels[1], "pv2_w", pv2_right)
+    pv_left = get_pv_series_db(tl_dt)
+    pv_right = get_pv_series_db(tr_dt)
 
     try:
         hourly = tibber_hourly_consumption(last=48)
@@ -1765,9 +1754,7 @@ def main():
 
     draw_two_day_chart(
         d, left, right, fonts, labels, chart_area,
-        pv_sum_left=pv_sum_left, pv_sum_right=pv_sum_right,
-        pv1_left=pv1_left, pv1_right=pv1_right,
-        pv2_left=pv2_left, pv2_right=pv2_right,
+        pv_left=pv_left, pv_right=pv_right,
         cons_left=cons_left, cons_right=cons_right,
         cur_dt=info['current_dt'], cur_price=info['current_price']
     )
@@ -1781,3 +1768,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Akzeptanztests:
+# 1) sqlite3 pv_data.db "select count(*) from pv_log;"
+#    -> Chart zeichnet 3 PV-Linien (wenn Werte >0 vorhanden)
+# 2) DB leer:
+#    -> Keine PV-Linie, kein Crash, keine flache 0-Linie bis Mitternacht
+# 3) Verbrauch:
+#    -> Tibber consumption läuft weiterhin (keine 'NoneType' subscriptable).
