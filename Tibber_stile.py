@@ -1590,21 +1590,25 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
 
     # Minutengenauer Marker (horizontale Interpolation)
     if cur_price is not None:
-        now = dt.datetime.now(LOCAL_TZ)
+        marker_dt = cur_dt or dt.datetime.now(LOCAL_TZ)
 
-        def pick_panel_for_now():
-            if len(tl) > 1 and tl[0] <= now <= tl[-1]:
+        def pick_panel_for_marker():
+            if len(tl) > 1 and tl[0].date() == marker_dt.date():
                 return tl, X0
-            if len(tr) > 1 and tr[0] <= now <= tr[-1]:
+            if len(tr) > 1 and tr[0].date() == marker_dt.date():
+                return tr, X0 + PW
+            if len(tl) > 1 and tl[0] <= marker_dt <= tl[-1]:
+                return tl, X0
+            if len(tr) > 1 and tr[0] <= marker_dt <= tr[-1]:
                 return tr, X0 + PW
             return None, None
 
-        arr, x0_panel = pick_panel_for_now()
+        arr, x0_panel = pick_panel_for_marker()
         if arr is not None:
             n = len(arr)
             if n > 1:
                 t0 = arr[0]
-                i_float = (now - t0).total_seconds() / 900.0  # 900s = 15 min
+                i_float = (marker_dt - t0).total_seconds() / 900.0  # 900s = 15 min
                 i_float = max(0.0, min(n - 1, i_float))
                 slot_w = PW / (n - 1)
                 px = x0_panel + i_float * slot_w
