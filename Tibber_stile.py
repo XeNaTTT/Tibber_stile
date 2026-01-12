@@ -289,24 +289,45 @@ def series_from_db(table, column, slots_dt, max_age_hours=48):
         out.append(float(0.0 if pd.isna(v) else v))
     return pd.Series(out, index=slots_dt)
 
-def _pv_series_from_db(slots_dt):
-    """Versucht historische PV-Daten aus bekannten Tabellen/Spalten zu lesen."""
-    candidates = [
-        ("pv_log", "pv_w"),
-        ("pv_log", "pv_power"),
-        ("pv_data", "pv_w"),
-        ("pv_data", "pv_power"),
-    ]
-    for table, col in candidates:
-        s = series_from_db(table, col, slots_dt)
-        if s is None:
-            continue
-        try:
-            if len(s) and s.max() > 0:
-                return s
-        except Exception:
-            continue
-    return None
+def pv_series_from_db(slots_dt, column, db_file=DB_FILE):
+    if not slots_dt:
+        logging.warning("PV DB leer für %s (%s)", "unbekannt", column)
+        return None
+    if column not in ("pv1_w", "pv2_w", "pv_sum_w"):
+        raise ValueError(f"PV DB column ungültig: {column}")
+
+    start_local = min(slots_dt)
+    end_local = max(slots_dt)
+    start_utc = int(start_local.astimezone(dt.timezone.utc).timestamp())
+    end_utc = int(end_local.astimezone(dt.timezone.utc).timestamp())
+
+    conn = sqlite3.connect(db_file)
+    try:
+        df = pd.read_sql_query(
+            f"SELECT ts, {column} FROM pv_log WHERE ts BETWEEN ? AND ?",
+            conn,
+            params=(start_utc, end_utc),
+        )
+    except Exception:
+        conn.close()
+        logging.warning("PV DB leer für %s (%s)", start_local.date().isoformat(), column)
+        return None
+    conn.close()
+
+    if df.empty:
+        logging.warning("PV DB leer für %s (%s)", start_local.date().isoformat(), column)
+        return None
+
+    df["ts"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(LOCAL_TZ)
+    df.set_index("ts", inplace=True)
+    df.sort_index(inplace=True)
+    df = df.resample("15T").mean().ffill().fillna(0)
+
+    out = []
+    for t in slots_dt:
+        v = df[column].asof(t) if not df.empty else np.nan
+        out.append(float(v) if v is not None and not pd.isna(v) else np.nan)
+    return pd.Series(out, index=slots_dt)
 
 
 def _pv_series_from_ecoflow_history(slots_dt):
@@ -357,31 +378,18 @@ def _pv_series_from_ecoflow_history(slots_dt):
     return history_series
 
 
-def get_pv_series(slots_dt, eco=None):
+def get_pv_series(slots_dt, column="pv_sum_w"):
     """
-    Holt historische PV-Daten aus der lokalen DB (falls vorhanden) und fällt
-    andernfalls auf die aktuelle EcoFlow-PV-Leistung zurück.
+    Holt PV-Daten aus der lokalen DB; falls leer, wird eine NaN-Serie geliefert.
     """
     try:
-        from_db = _pv_series_from_db(slots_dt)
-        if from_db is not None:
-            logging.info("Nutze historische PV-Daten aus der lokalen DB")
-            return _mask_future(from_db)
-
-        from_history = _pv_series_from_ecoflow_history(slots_dt)
-        if from_history is not None:
-            return _mask_future(from_history)
-
-        if eco is None:
-            eco = ecoflow_status_bkw()
-        pv_watt = eco.get("pv_input_w_sum") if isinstance(eco, dict) else None
-        pv_watt = float(pv_watt or 0.0)
-        if ECO_DEBUG:
-            logging.info(f"EcoFlow PV aktuell: {pv_watt} W")
-        return _mask_future(pd.Series([pv_watt] * len(slots_dt), index=slots_dt))
+        from_db = pv_series_from_db(slots_dt, column)
+        if from_db is None:
+            return _mask_future(pd.Series([np.nan] * len(slots_dt), index=slots_dt))
+        return _mask_future(from_db)
     except Exception as e:
-        logging.error(f"PV aus EcoFlow fehlgeschlagen: {e}")
-        return _mask_future(pd.Series([0.0] * len(slots_dt), index=slots_dt))
+        logging.error("PV DB fehlgeschlagen (%s): %s", column, e)
+        return _mask_future(pd.Series([np.nan] * len(slots_dt), index=slots_dt))
 
 
 def _mask_future(series):
@@ -1447,8 +1455,9 @@ def draw_info_box(d, info, fonts, y, width):
         d.text((x0 + i*colw, y), f"{k}: {v}", font=fonts['bold'], fill=0)
 
 def draw_two_day_chart(d, left, right, fonts, subtitles, area,
-                       pv1_left=None, pv2_left=None, pvs_left=None,
-                       pv1_right=None, pv2_right=None, pvs_right=None,
+                       pv_sum_left=None, pv_sum_right=None,
+                       pv1_left=None, pv1_right=None,
+                       pv2_left=None, pv2_right=None,
                        cons_left=None, cons_right=None,
                        cur_dt=None, cur_price=None):
     PRICE_MIN_CENT = 5
@@ -1473,7 +1482,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
         if series is None: return 0
         try: return float(np.nanmax(series)) if len(series)>0 else 0
         except: return 0
-    pv_max = max(vmax_power(pvs_left), vmax_power(pvs_right),
+    pv_max = max(vmax_power(pv_sum_left), vmax_power(pv_sum_right),
                  vmax_power(pv1_left), vmax_power(pv2_left),
                  vmax_power(pv1_right), vmax_power(pv2_right))
     cons_max = max(vmax_power(cons_left), vmax_power(cons_right))
@@ -1492,7 +1501,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
 
     has_pv = any(
         _series_has_values(s)
-        for s in (pvs_left, pvs_right, pv1_left, pv2_left, pv1_right, pv2_right)
+        for s in (pv_sum_left, pv_sum_right, pv1_left, pv2_left, pv1_right, pv2_right)
     )
 
     # Preis-Y-Ticks (nur innerhalb)
@@ -1504,7 +1513,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
             d.text((X0-45, yy-7), f"{yv/100:.2f}", font=fonts['tiny'], fill=0)
         yv += step
 
-    def panel(ts_list, val_list, pv1_list, pv2_list, pvs_list, cons_list, x0):
+    def panel(ts_list, val_list, pv1_list, pv2_list, pv_sum_list, cons_list, x0):
         n = len(ts_list)
         if n < 2: return
         xs = [x0 + i*(PW/(n-1)) for i in range(n)]
@@ -1539,14 +1548,14 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                     draw_dashed_line(d, last_pt[0], last_pt[1], x, y, dash=3, gap=2, width=1)
                 last_pt = (x, y)
         # PV-Summe (solid, dicker)
-        if has_pv and pvs_list is not None and n == len(pvs_list):
+        if has_pv and pv_sum_list is not None and n == len(pv_sum_list):
             last_pt = None
             for i in range(n):
-                if pd.isna(pvs_list.iloc[i]):
+                if pd.isna(pv_sum_list.iloc[i]):
                     last_pt = None
                     continue
                 x = xs[i]
-                y = Y1 - pvs_list.iloc[i]*sy_pv
+                y = Y1 - pv_sum_list.iloc[i]*sy_pv
                 if last_pt is not None:
                     d.line((last_pt[0], last_pt[1], x, y), fill=0, width=2)
                 last_pt = (x, y)
@@ -1568,9 +1577,9 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
             xi, yi = xs[idx], _price_to_y(val_list[idx])
             d.text((xi-12, yi-12), f"{val_list[idx]/100:.2f}", font=fonts['tiny'], fill=0)
 
-    panel(tl, vl, pv1_left, pv2_left, pvs_left, cons_left, X0)
+    panel(tl, vl, pv1_left, pv2_left, pv_sum_left, cons_left, X0)
     d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
-    panel(tr, vr, pv1_right, pv2_right, pvs_right, cons_right, X0+PW)
+    panel(tr, vr, pv1_right, pv2_right, pv_sum_right, cons_right, X0+PW)
 
     # Subtitles unter Achse
     d.text((X0+5,    Y1+28), subtitles[0], font=fonts['bold'], fill=0)
@@ -1589,7 +1598,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     hour_ticks(tr, X0+PW)
 
     # Legende Leistung
-    d.text((X1-260, Y0-16), "PV1 — PV2 - - PVΣ  ---- Verbrauch", font=fonts['tiny'], fill=0)
+    d.text((X1-300, Y0-16), "PV Summe — PV1 — PV2 - - Verbrauch   Strompreis", font=fonts['tiny'], fill=0)
     if not has_pv:
         d.text((X0 + 6, Y0 + 6), "PV Historie nicht verfügbar (Micro offline/keine Daten)", font=fonts['tiny'], fill=0)
 
@@ -1701,8 +1710,27 @@ def main():
     tl_dt, _ = slots_to_15min(left)
     tr_dt, _ = slots_to_15min(right)
 
-    pv1_left, pv2_left, pvs_left = get_pv_series_multi_micro(tl_dt)
-    pv1_right, pv2_right, pvs_right = get_pv_series_multi_micro(tr_dt)
+    pv_sum_left = get_pv_series(tl_dt, column="pv_sum_w")
+    pv_sum_right = get_pv_series(tr_dt, column="pv_sum_w")
+    pv1_left = get_pv_series(tl_dt, column="pv1_w")
+    pv1_right = get_pv_series(tr_dt, column="pv1_w")
+    pv2_left = get_pv_series(tl_dt, column="pv2_w")
+    pv2_right = get_pv_series(tr_dt, column="pv2_w")
+
+    def _log_pv_db(label, column, series):
+        if series is None:
+            logging.warning("PV DB leer für %s (%s)", label, column)
+            return
+        points = len(series.dropna())
+        nonzero = int((series.fillna(0) > 0).sum())
+        logging.info("PV DB %s: %s points=%d (nonzero=%d)", label, column, points, nonzero)
+
+    _log_pv_db(labels[0], "pv_sum_w", pv_sum_left)
+    _log_pv_db(labels[1], "pv_sum_w", pv_sum_right)
+    _log_pv_db(labels[0], "pv1_w", pv1_left)
+    _log_pv_db(labels[1], "pv1_w", pv1_right)
+    _log_pv_db(labels[0], "pv2_w", pv2_left)
+    _log_pv_db(labels[1], "pv2_w", pv2_right)
 
     try:
         hourly = tibber_hourly_consumption(last=48)
@@ -1756,8 +1784,9 @@ def main():
 
     draw_two_day_chart(
         d, left, right, fonts, labels, chart_area,
-        pv1_left=pv1_left, pv2_left=pv2_left, pvs_left=pvs_left,
-        pv1_right=pv1_right, pv2_right=pv2_right, pvs_right=pvs_right,
+        pv_sum_left=pv_sum_left, pv_sum_right=pv_sum_right,
+        pv1_left=pv1_left, pv1_right=pv1_right,
+        pv2_left=pv2_left, pv2_right=pv2_right,
         cons_left=cons_left, cons_right=cons_right,
         cur_dt=info['current_dt'], cur_price=info['current_price']
     )
