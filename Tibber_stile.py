@@ -141,7 +141,14 @@ def tibber_priceinfo():
     if isinstance(j, dict) and j.get("errors"):
         raise RuntimeError(f"Tibber GraphQL Fehler: {j['errors']}")
     try:
-        pi = j['data']['viewer']['homes'][0]['currentSubscription']['priceInfo']
+        data = (j or {}).get("data") or {}
+        viewer = data.get("viewer") or {}
+        homes = viewer.get("homes") or []
+        home0 = homes[0] if homes else {}
+        cs = (home0.get("currentSubscription") or {})
+        pi = (cs.get("priceInfo") or {})
+        if not pi or not (pi.get("today") or pi.get("current")):
+            raise RuntimeError(f"Tibber Antwort unerwartet/leer: data_keys={list(data.keys())}")
         logging.info(
             "Tibber Preisinfo via API: heute=%d, morgen=%d, current=%s",
             len(pi.get("today", []) or []),
@@ -150,7 +157,7 @@ def tibber_priceinfo():
         )
         return pi
     except Exception as e:
-        raise RuntimeError(f"Tibber Antwort unerwartet: {e}, payload keys: {list(j.keys())}")
+        raise RuntimeError(f"Tibber Antwort unerwartet: {e}, payload keys: {list((j or {}).keys())}")
 
 
 def tibber_priceinfo_quarter_range():
@@ -450,15 +457,30 @@ def tibber_hourly_consumption(last=48):
       }}
     }}}} }}
     """
-    r = requests.post("https://api.tibber.com/v1-beta/gql", json={"query": q}, headers=hdr, timeout=15)
-    r.raise_for_status()
-    j = r.json()
-    nodes = j["data"]["viewer"]["homes"][0]["consumption"]["nodes"]
-    out = []
-    for n in nodes:
-        f = dt.datetime.fromisoformat(n["from"]).astimezone(LOCAL_TZ)
-        out.append((f, float(n["consumption"] or 0.0)))
-    return out
+    try:
+        r = requests.post("https://api.tibber.com/v1-beta/gql", json={"query": q}, headers=hdr, timeout=15)
+        r.raise_for_status()
+        j = r.json()
+        if isinstance(j, dict) and j.get("errors"):
+            logging.error("Tibber consumption GraphQL errors: %s", str(j["errors"])[:300])
+            return []
+        data = (j or {}).get("data") or {}
+        viewer = data.get("viewer") or {}
+        homes = viewer.get("homes") or []
+        home0 = homes[0] if homes else {}
+        cons = (home0.get("consumption") or {})
+        nodes = cons.get("nodes") or []
+        out = []
+        for n in nodes:
+            try:
+                f = dt.datetime.fromisoformat(n["from"]).astimezone(LOCAL_TZ)
+                out.append((f, float(n.get("consumption") or 0.0)))
+            except Exception:
+                continue
+        return out
+    except Exception as e:
+        logging.error("Tibber consumption fetch failed: %s", e)
+        return []
 
 def upsample_hourly_to_quarter(ts_15min, hourly_list):
     import bisect
@@ -1599,8 +1621,8 @@ def main():
         )
     else:
         logging.info("Keine Tibber-Verbrauchsdaten erhalten")
-    cons_left  = upsample_hourly_to_quarter(tl_dt, hourly)
-    cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
+    cons_left  = upsample_hourly_to_quarter(tl_dt, hourly) if hourly else pd.Series([0.0]*len(tl_dt), index=tl_dt)
+    cons_right = upsample_hourly_to_quarter(tr_dt, hourly) if hourly else pd.Series([0.0]*len(tr_dt), index=tr_dt)
 
     sun_today, sun_tomorrow = sunshine_hours_both(api_key.LAT, api_key.LON)
     logging.info(
