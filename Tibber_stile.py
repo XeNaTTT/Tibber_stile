@@ -11,9 +11,9 @@ ECO_DEBUG = bool(int(os.getenv("ECO_DEBUG", "0")))
 PV_PAT = re.compile(r"(pv|solar|yield|gen|power|input|watt|energy)", re.I)
 DUMP_DIR = "/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_dump"
 # Solar-Historie laut EcoFlow-Doku (PV-Linie)
-ECOFLOW_SOLAR_ENERGY_CODE = "BK621-App-HOME-SOLAR-ENERGY-FLOW-solor-line-NOTDISTINGUISH-MASTER_DATA"
-ECOFLOW_PV1_CODE = "<PV1 code>"
-ECOFLOW_PV2_CODE = "<PV2 code>"
+ECOFLOW_SOLAR_ENERGY_CODE = "BK621_SOLAR-ENERGY||||"
+ECOFLOW_PV1_CODE = None
+ECOFLOW_PV2_CODE = None
 ECOFLOW_PV_TOTAL_CODE = None
 
 # Zeitzone
@@ -82,6 +82,20 @@ def _dump_json(name, obj):
             pass
     return None
 
+def _dump_json_force(name, obj):
+    try:
+        os.makedirs(DUMP_DIR, exist_ok=True)
+        ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        fn = os.path.join(DUMP_DIR, f"{name}_{ts}.json")
+        with open(fn, "w") as f:
+            json.dump(obj, f, indent=2, ensure_ascii=False)
+        return fn
+    except Exception as e:
+        try:
+            logging.debug("EcoFlow debug dump(force) skipped: %s", e)
+        except Exception:
+            pass
+    return None
 
 def _pv_candidates(d):
     if not isinstance(d, dict):
@@ -147,7 +161,7 @@ def tibber_priceinfo():
         home0 = homes[0] if homes else {}
         cs = (home0.get("currentSubscription") or {})
         pi = (cs.get("priceInfo") or {})
-        if not pi or not (pi.get("today") or pi.get("current")):
+        if not pi or not pi.get("today"):
             raise RuntimeError(f"Tibber Antwort unerwartet/leer: data_keys={list(data.keys())}")
         logging.info(
             "Tibber Preisinfo via API: heute=%d, morgen=%d, current=%s",
@@ -404,23 +418,45 @@ def get_pv_series_micro(slots_dt, micro_sn, code, kind="auto"):
     series.attrs["energy_to_power"] = bool(hist.attrs.get("energy_to_power")) if hist is not None else False
     return _mask_future(series)
 
+def get_pv_total_series_micro(slots_dt):
+    if not slots_dt:
+        return _mask_future(pd.Series(dtype=float))
+    micro_sn = getattr(api_key, "ECOFLOW_MIKRO_ID", "").strip()
+    if not micro_sn:
+        return _mask_future(pd.Series([0.0] * len(slots_dt), index=slots_dt))
+    try:
+        today = dt.datetime.now(tz=LOCAL_TZ).date()
+        begin_local = dt.datetime.combine(today, dt.time.min, tzinfo=LOCAL_TZ)
+        end_local = dt.datetime.now(tz=LOCAL_TZ)
+        hist = ecoflow_quota_data(micro_sn, begin_local, end_local, ECOFLOW_SOLAR_ENERGY_CODE, expected_kind="auto")
+        if hist is None or hist.empty:
+            series = pd.Series([np.nan] * len(slots_dt), index=slots_dt)
+            series.attrs["energy_to_power"] = False
+            series.attrs["pv_missing"] = True
+            logging.info("PV energy->power triggered: %s", series.attrs.get("energy_to_power"))
+            return _mask_future(series)
+        values = []
+        now = dt.datetime.now(tz=LOCAL_TZ)
+        for ts in slots_dt:
+            if ts > now:
+                values.append(np.nan)
+                continue
+            v = hist.asof(ts) if hist is not None and not hist.empty else None
+            values.append(float(0.0 if v is None or pd.isna(v) else v))
+        series = pd.Series(values, index=slots_dt)
+        series.attrs["energy_to_power"] = bool(hist.attrs.get("energy_to_power")) if hist is not None else False
+        logging.info("PV energy->power triggered: %s", series.attrs.get("energy_to_power"))
+        return _mask_future(series)
+    except Exception as e:
+        logging.error("EcoFlow PV total series fehlgeschlagen: %s", e)
+        return _mask_future(pd.Series([0.0] * len(slots_dt), index=slots_dt))
 
 def get_pv_series_multi_micro(slots_dt):
     global _PV_LOGGED
     micro_sn = getattr(api_key, "ECOFLOW_MIKRO_ID", "").strip()
-    pv1 = get_pv_series_micro(slots_dt, micro_sn, ECOFLOW_PV1_CODE, kind="auto")
-    pv2 = get_pv_series_micro(slots_dt, micro_sn, ECOFLOW_PV2_CODE, kind="auto")
-
-    pv_sum = None
-    if ECOFLOW_PV_TOTAL_CODE:
-        pv_sum = get_pv_series_micro(slots_dt, micro_sn, ECOFLOW_PV_TOTAL_CODE, kind="auto")
-        if pv_sum is None or pv_sum.empty:
-            pv_sum = None
-
-    if pv_sum is None:
-        pv_sum = pv1.add(pv2, fill_value=0.0)
-        mask = pv1.isna() & pv2.isna()
-        pv_sum[mask] = np.nan
+    pv1 = None
+    pv2 = None
+    pv_sum = get_pv_total_series_micro(slots_dt)
 
     pv_sum = _mask_future(pv_sum)
 
@@ -468,7 +504,10 @@ def tibber_hourly_consumption(last=48):
         viewer = data.get("viewer") or {}
         homes = viewer.get("homes") or []
         home0 = homes[0] if homes else {}
-        cons = (home0.get("consumption") or {})
+        cons = home0.get("consumption")
+        if cons is None or cons.get("nodes") is None:
+            logging.error("Tibber consumption missing nodes in response")
+            return []
         nodes = cons.get("nodes") or []
         out = []
         for n in nodes:
@@ -847,6 +886,10 @@ def _parse_ecoflow_quota_data_payload(j):
             return data.get("data")
         if isinstance(data.get("list"), list):
             return data.get("list")
+        if isinstance(data.get("records"), list):
+            return data.get("records")
+        if isinstance(data.get("quotaData"), list):
+            return data.get("quotaData")
     return None
 
 
@@ -901,28 +944,55 @@ def ecoflow_quota_data(sn_any, begin_dt_local, end_dt_local, code, expected_kind
     begin_utc = begin_local.astimezone(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     end_utc = end_local.astimezone(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    body = {
-        "sn": main_sn,
-        "params": {
-            "beginTime": begin_utc,
-            "endTime": end_utc,
-            "code": code,
-        },
-    }
-    hdr = _signed_headers(
-        api_key.ECOFLOW_APP_KEY,
-        api_key.ECOFLOW_SECRET_KEY,
-        body,
-        content_type="application/json;charset=UTF-8",
-    )
-    url = f"{base}/iot-open/sign/device/quota/data"
-    r = requests.post(url, headers=hdr, json=body, timeout=15)
-    try:
-        j = r.json()
-    except Exception:
-        j = {"raw": r.text}
+    def _fetch_quota_data(begin_val, end_val, mode_label):
+        body = {
+            "sn": main_sn,
+            "params": {
+                "beginTime": begin_val,
+                "endTime": end_val,
+                "code": code,
+            },
+        }
+        hdr = _signed_headers(
+            api_key.ECOFLOW_APP_KEY,
+            api_key.ECOFLOW_SECRET_KEY,
+            body,
+            content_type="application/json;charset=UTF-8",
+        )
+        url = f"{base}/iot-open/sign/device/quota/data"
+        try:
+            r = requests.post(url, headers=hdr, json=body, timeout=15)
+            try:
+                j = r.json()
+            except Exception:
+                j = {"raw": r.text}
+            entries = _parse_ecoflow_quota_data_payload(j) or []
+            logging.info(
+                "EcoFlow quota/data %s http=%s code=%s msg=%s entries=%s",
+                mode_label,
+                r.status_code,
+                j.get("code") if isinstance(j, dict) else None,
+                j.get("message") if isinstance(j, dict) else None,
+                len(entries),
+            )
+            return entries, j
+        except Exception as e:
+            logging.error("EcoFlow quota/data request failed (%s): %s", mode_label, e)
+            return [], {"error": str(e)}
 
-    entries = _parse_ecoflow_quota_data_payload(j) or []
+    entries, j = _fetch_quota_data(begin_utc, end_utc, "utc")
+    if not entries:
+        _dump_json_force(f"ecoflow_quota_data_{main_sn}_{code}_utc", j)
+        begin_local_str = begin_local.strftime("%Y-%m-%d %H:%M:%S")
+        end_local_str = end_local.strftime("%Y-%m-%d %H:%M:%S")
+        entries, j = _fetch_quota_data(begin_local_str, end_local_str, "local")
+        _dump_json_force(f"ecoflow_quota_data_{main_sn}_{code}_local", j)
+    if not entries:
+        begin_epoch = int(begin_local.timestamp() * 1000)
+        end_epoch = int(end_local.timestamp() * 1000)
+        entries, j = _fetch_quota_data(begin_epoch, end_epoch, "epoch")
+        _dump_json_force(f"ecoflow_quota_data_{main_sn}_{code}_epoch", j)
+
     points = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -939,12 +1009,11 @@ def ecoflow_quota_data(sn_any, begin_dt_local, end_dt_local, code, expected_kind
             continue
         val = (
             _to_float(entry.get("value"))
-            or _to_float(entry.get("power"))
-            or _to_float(entry.get("pvPower"))
-            or _to_float(entry.get("data"))
             or _to_float(entry.get("val"))
-            or _to_float(entry.get("indexValue"))
+            or _to_float(entry.get("data"))
             or _to_float(entry.get("energy"))
+            or _to_float(entry.get("power"))
+            or _to_float(entry.get("indexValue"))
         )
         if val is None:
             continue
@@ -1237,7 +1306,8 @@ def ecoflow_status_bkw():
         "pv1_input_w": None,
         "pv2_input_w": None,
         "grid_w": grid_w,
-        "load_w": load_w
+        "load_w": load_w,
+        "micro_online": (device_map.get(sn_micro, {}) or {}).get("online")
     }
 
 
@@ -1355,6 +1425,10 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     d.text((op_x, result_y), "=", font=fonts['tiny'], fill=0)
     d.text((lbl_x, result_y), "Last:", font=fonts['tiny'], fill=0)
     d.text((val_x, result_y), fmt_w(load_w), font=fonts['tiny'], fill=0)
+    micro_online = st.get("micro_online")
+    if micro_online is not None:
+        micro_label = f"Micro online={1 if micro_online else 0}"
+        d.text((x + 10, y + h - 14), micro_label, font=fonts['tiny'], fill=0)
 
 
 def draw_info_box(d, info, fonts, y, width):
@@ -1398,11 +1472,27 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
         if series is None: return 0
         try: return float(np.nanmax(series)) if len(series)>0 else 0
         except: return 0
-    pmax = max(vmax_power(pvs_left), vmax_power(pvs_right),
-               vmax_power(pv1_left), vmax_power(pv2_left),
-               vmax_power(pv1_right), vmax_power(pv2_right),
-               vmax_power(cons_left), vmax_power(cons_right))
-    sy_pow = H/((pmax or 1)*1.2)
+    pv_max = max(vmax_power(pvs_left), vmax_power(pvs_right),
+                 vmax_power(pv1_left), vmax_power(pv2_left),
+                 vmax_power(pv1_right), vmax_power(pv2_right))
+    cons_max = max(vmax_power(cons_left), vmax_power(cons_right))
+    pv_scale_max = max(pv_max * 1.2, 1)
+    cons_scale_max = max(cons_max * 1.2, 1)
+    sy_pv = H / pv_scale_max
+    sy_cons = H / cons_scale_max
+
+    def _series_has_values(series):
+        if series is None:
+            return False
+        try:
+            return np.isfinite(series).any()
+        except Exception:
+            return False
+
+    has_pv = any(
+        _series_has_values(s)
+        for s in (pvs_left, pvs_right, pv1_left, pv2_left, pv1_right, pv2_right)
+    )
 
     # Preis-Y-Ticks (nur innerhalb)
     step = 5
@@ -1424,38 +1514,38 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
             d.line((x1,y1, x2,y1), fill=0, width=2)
             d.line((x2,y1, x2,y2), fill=0, width=2)
         # PV1 (solid)
-        if pv1_list is not None and n == len(pv1_list):
+        if has_pv and pv1_list is not None and n == len(pv1_list):
             last_pt = None
             for i in range(n):
                 if pd.isna(pv1_list.iloc[i]):
                     last_pt = None
                     continue
                 x = xs[i]
-                y = Y1 - pv1_list.iloc[i]*sy_pow
+                y = Y1 - pv1_list.iloc[i]*sy_pv
                 if last_pt is not None:
                     d.line((last_pt[0], last_pt[1], x, y), fill=0, width=1)
                 last_pt = (x, y)
         # PV2 (dashed)
-        if pv2_list is not None and n == len(pv2_list):
+        if has_pv and pv2_list is not None and n == len(pv2_list):
             last_pt = None
             for i in range(n):
                 if pd.isna(pv2_list.iloc[i]):
                     last_pt = None
                     continue
                 x = xs[i]
-                y = Y1 - pv2_list.iloc[i]*sy_pow
+                y = Y1 - pv2_list.iloc[i]*sy_pv
                 if last_pt is not None:
                     draw_dashed_line(d, last_pt[0], last_pt[1], x, y, dash=3, gap=2, width=1)
                 last_pt = (x, y)
         # PV-Summe (solid, dicker)
-        if pvs_list is not None and n == len(pvs_list):
+        if has_pv and pvs_list is not None and n == len(pvs_list):
             last_pt = None
             for i in range(n):
                 if pd.isna(pvs_list.iloc[i]):
                     last_pt = None
                     continue
                 x = xs[i]
-                y = Y1 - pvs_list.iloc[i]*sy_pow
+                y = Y1 - pvs_list.iloc[i]*sy_pv
                 if last_pt is not None:
                     d.line((last_pt[0], last_pt[1], x, y), fill=0, width=2)
                 last_pt = (x, y)
@@ -1467,7 +1557,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                     last_pt = None
                     continue
                 x = xs[i]
-                y = Y1 - cons_list.iloc[i]*sy_pow
+                y = Y1 - cons_list.iloc[i]*sy_cons
                 if last_pt is not None:
                     draw_dashed_line(d, last_pt[0], last_pt[1], x, y, dash=4, gap=3, width=1)
                 last_pt = (x, y)
@@ -1499,6 +1589,8 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
 
     # Legende Leistung
     d.text((X1-260, Y0-16), "PV1 — PV2 - - PVΣ  ---- Verbrauch", font=fonts['tiny'], fill=0)
+    if not has_pv:
+        d.text((X0 + 6, Y0 + 6), "PV Historie nicht verfügbar (Micro offline/keine Daten)", font=fonts['tiny'], fill=0)
 
     # Minutengenauer Marker (horizontale Interpolation)
     if cur_price is not None:
