@@ -1303,9 +1303,12 @@ def ecoflow_status_bkw():
 
 # ---------- Drawing ----------
 def draw_dashed_line(d, x1, y1, x2, y2, dash=2, gap=2, fill=0, width=1):
+    if not all(map(math.isfinite, (x1, y1, x2, y2))):
+        return
     dx, dy = x2-x1, y2-y1
     dist = math.hypot(dx, dy)
-    if dist == 0: return
+    if dist == 0 or not math.isfinite(dist):
+        return
     step = dash+gap
     for i in range(int(dist/step)+1):
         s, e = i*step, min(i*step+dash, dist)
@@ -1458,7 +1461,11 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
 
     def vmax_power(series):
         if series is None: return 0
-        try: return float(np.nanmax(series)) if len(series)>0 else 0
+        try:
+            if len(series) == 0:
+                return 0
+            val = float(np.nanmax(series))
+            return val if math.isfinite(val) else 0
         except: return 0
     pv_left = pv_left or {}
     pv_right = pv_right or {}
