@@ -145,7 +145,21 @@ def pv_forecast_series_for_tomorrow(
 
     if not profiles:
         logging.warning("Keine brauchbaren Profile in DB gefunden (letzte %d Tage).", lookback_profiles_days)
-        return pd.Series([np.nan] * len(slots_tom), index=slots_tom), {"base_wh": 0.0, "scale": 1.0, "used_days": []}
+        empty_series = pd.Series([np.nan] * len(slots_tom), index=slots_tom)
+        return empty_series, {
+            "tomorrow": str(tomorrow),
+            "base_wh": 0.0,
+            "scale": 1.0,
+            "forecast_wh": 0.0,
+            "used_days": [],
+            "sun_today_h": None,
+            "sun_tomorrow_h": None,
+            "profile_sum": 0.0,
+            "energy_check_wh": 0.0,
+            "peak_w": 0.0,
+            "peak_time": "n/a",
+            "weather": None,
+        }
 
     prof_df = pd.concat(profiles, axis=1)  # columns=days
     median_profile = prof_df.median(axis=1).clip(lower=0.0)
@@ -153,8 +167,23 @@ def pv_forecast_series_for_tomorrow(
     # normieren auf Summe=1 (Sicherheitsnetz)
     ssum = float(median_profile.sum())
     if ssum <= 0:
-        return pd.Series([np.nan] * len(slots_tom), index=slots_tom), {"base_wh": 0.0, "scale": 1.0, "used_days": used_days}
+        empty_series = pd.Series([np.nan] * len(slots_tom), index=slots_tom)
+        return empty_series, {
+            "tomorrow": str(tomorrow),
+            "base_wh": 0.0,
+            "scale": 1.0,
+            "forecast_wh": 0.0,
+            "used_days": [d.isoformat() for d in used_days],
+            "sun_today_h": None,
+            "sun_tomorrow_h": None,
+            "profile_sum": 0.0,
+            "energy_check_wh": 0.0,
+            "peak_w": 0.0,
+            "peak_time": "n/a",
+            "weather": None,
+        }
     median_profile = median_profile / ssum
+    profile_sum = float(median_profile.sum())
 
     # 2) Basisenergie (Wh) aus letzten 7 Tagen
     energies = []
@@ -168,11 +197,15 @@ def pv_forecast_series_for_tomorrow(
     # 3) Wetter-Skalierung
     scale = 1.0
     weather = None
+    sun_today_h = None
+    sun_tomorrow_h = None
     if force_scale is not None:
         scale = float(force_scale)
     elif lat is not None and lon is not None:
         try:
             sun_today, sun_tom, weather = sunshine_hours_both(lat, lon)
+            sun_today_h = float(sun_today)
+            sun_tomorrow_h = float(sun_tom)
             # robust: bei sehr wenig Sonne heute clamp denominator
             denom = max(float(sun_today), 0.2)
             scale = float(sun_tom) / denom
@@ -186,6 +219,14 @@ def pv_forecast_series_for_tomorrow(
     # 4) In W-Serie (15-min) zurück
     # Ziel: Sum(W*0.25)=forecast_wh => W = profile * (forecast_wh/0.25)
     w_series = median_profile * (forecast_wh / 0.25)
+    energy_check_wh = float((w_series.clip(lower=0.0) * 0.25).sum())
+    peak_series = w_series.fillna(0.0).clip(lower=0.0)
+    if len(peak_series) > 0:
+        peak_w = float(peak_series.max())
+        peak_time = peak_series.idxmax().strftime("%H:%M")
+    else:
+        peak_w = 0.0
+        peak_time = "n/a"
 
     meta = {
         "tomorrow": str(tomorrow),
@@ -193,6 +234,12 @@ def pv_forecast_series_for_tomorrow(
         "scale": scale,
         "forecast_wh": forecast_wh,
         "used_days": [d.isoformat() for d in used_days],
+        "sun_today_h": sun_today_h,
+        "sun_tomorrow_h": sun_tomorrow_h,
+        "profile_sum": profile_sum,
+        "energy_check_wh": energy_check_wh,
+        "peak_w": peak_w,
+        "peak_time": peak_time,
         "weather": weather,
     }
     return w_series, meta
@@ -210,24 +257,57 @@ def render_forecast_png(series_w: pd.Series, meta: dict, outfile: str, width=800
         f_b = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
         f_s = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
         f_t = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+        f_m = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 12)
     except Exception:
-        f_b = f_s = f_t = ImageFont.load_default()
+        f_b = f_s = f_t = f_m = ImageFont.load_default()
 
     # Layout
     margin = 40
-    X0, Y0 = margin, 60
-    X1, Y1 = width - margin, height - 60
-    W, H = X1 - X0, Y1 - Y0
+    X0 = margin
+    X1 = width - margin
 
     # Title
     title = f"PV-Prognose (morgen) – {meta.get('tomorrow','')}"
     d.text((margin, 18), title, font=f_b, fill=0)
 
-    # Meta
-    base_wh = meta.get("base_wh", 0.0)
-    scale = meta.get("scale", 1.0)
-    fc_wh = meta.get("forecast_wh", 0.0)
-    d.text((margin, 40), f"base={base_wh:.0f} Wh  scale={scale:.2f}  forecast={fc_wh:.0f} Wh", font=f_s, fill=0)
+    # Forecast steps block
+    base_wh = float(meta.get("base_wh", 0.0))
+    scale = float(meta.get("scale", 1.0))
+    fc_wh = float(meta.get("forecast_wh", 0.0))
+    used_days = meta.get("used_days", [])
+    sun_today_h = meta.get("sun_today_h", None)
+    sun_tomorrow_h = meta.get("sun_tomorrow_h", None)
+    profile_sum = float(meta.get("profile_sum", 0.0))
+    peak_w = float(meta.get("peak_w", 0.0))
+    energy_check_wh = float(meta.get("energy_check_wh", 0.0))
+
+    used_days_text = ""
+    if used_days:
+        used_days_text = f" ({', '.join(used_days[-5:])})"
+
+    def _fmt_h(val):
+        return "n/a" if val is None else f"{val:.1f}"
+
+    steps_lines = [
+        "Forecast Steps",
+        f"DB days used (profiles): {len(used_days)}{used_days_text}",
+        f"base_wh (mean last 7 valid days): {base_wh:.0f} Wh",
+        f"sun_today: {_fmt_h(sun_today_h)} h   sun_tomorrow: {_fmt_h(sun_tomorrow_h)} h",
+        f"scale = clamp(sun_tomorrow / max(sun_today,0.2), 0.2..1.8): {scale:.2f}",
+        f"forecast_wh = base_wh * scale: {fc_wh:.0f} Wh",
+        f"profile normalization: sum(profile)={profile_sum:.3f}",
+        f"peak_w (max of forecast series): {peak_w:.0f} W",
+        f"y_max: {y_max:.0f} W",
+    ]
+    block_x = margin
+    block_y = 40
+    line_h = 14
+    for i, line in enumerate(steps_lines):
+        d.text((block_x, block_y + i * line_h), line, font=f_m, fill=0)
+
+    Y0 = block_y + len(steps_lines) * line_h + 10
+    Y1 = height - 60
+    W, H = X1 - X0, Y1 - Y0
 
     # Axes box
     d.rectangle((X0, Y0, X1, Y1), outline=0, width=2)
@@ -268,6 +348,19 @@ def render_forecast_png(series_w: pd.Series, meta: dict, outfile: str, width=800
         if last is not None:
             d.line((last[0], last[1], p[0], p[1]), fill=0, width=2)
         last = p
+
+    # Peak marker
+    if len(arr) > 0:
+        peak_idx = int(np.argmax(arr))
+        peak_x = X0 + (peak_idx / (n - 1)) * W
+        peak_y = Y1 - (arr[peak_idx] / y_max) * H
+        r = 3
+        d.ellipse((peak_x - r, peak_y - r, peak_x + r, peak_y + r), outline=0, fill=0)
+        label = f"peak {peak_w:.0f}W @ {meta.get('peak_time','n/a')}"
+        d.text((peak_x + 6, max(Y0, peak_y - 12)), label, font=f_t, fill=0)
+
+    # Energy check
+    d.text((margin, height - 46), f"Energy check: sum(W*0.25h)={energy_check_wh:.0f} Wh", font=f_t, fill=0)
 
     # Footer
     now = dt.datetime.now(tz=LOCAL_TZ).strftime("%H:%M %d.%m.%Y")
