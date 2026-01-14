@@ -129,6 +129,27 @@ def pick(src, keys):
     return res
 
 # ---------- Tibber ----------
+def pick_home_with_data(homes):
+    """Wählt das erste Home, das verwertbare Daten hat (PriceInfo oder Consumption)."""
+    if not homes:
+        return None
+
+    # Prefer: Home mit currentSubscription.priceInfo.today
+    for h in homes:
+        cs = (h or {}).get("currentSubscription") or {}
+        pi = (cs.get("priceInfo") or {})
+        if pi.get("today"):
+            return h
+
+    # Fallback: Home mit consumption.nodes
+    for h in homes:
+        cons = (h or {}).get("consumption") or {}
+        nodes = cons.get("nodes") if isinstance(cons, dict) else None
+        if nodes:
+            return h
+
+    return homes[0]
+
 def tibber_priceinfo():
     if not getattr(api_key, "API_KEY", None) or str(api_key.API_KEY).startswith("DEIN_"):
         raise RuntimeError("Tibber API_KEY fehlt/Platzhalter. Trage einen gÃ¼ltigen Token in api_key.py ein.")
@@ -158,9 +179,14 @@ def tibber_priceinfo():
         data = (j or {}).get("data") or {}
         viewer = data.get("viewer") or {}
         homes = viewer.get("homes") or []
-        home0 = homes[0] if homes else {}
-        cs = (home0.get("currentSubscription") or {})
+        home = pick_home_with_data(homes) or {}
+        cs = (home.get("currentSubscription") or {})
         pi = (cs.get("priceInfo") or {})
+        logging.info(
+            "Tibber: homes=%d, picked_home_has_priceinfo=%s",
+            len(homes),
+            bool(((home.get("currentSubscription") or {}).get("priceInfo") or {}).get("today"))
+        )
         if not pi or not pi.get("today"):
             raise RuntimeError(f"Tibber Antwort unerwartet/leer: data_keys={list(data.keys())}")
         logging.info(
@@ -503,7 +529,13 @@ def tibber_hourly_consumption(last=48):
     r = requests.post("https://api.tibber.com/v1-beta/gql", json={"query": q}, headers=hdr, timeout=15)
     r.raise_for_status()
     j = r.json()
-    nodes = j["data"]["viewer"]["homes"][0]["consumption"]["nodes"]
+    homes = (((j.get("data") or {}).get("viewer") or {}).get("homes") or [])
+    home = pick_home_with_data(homes) or {}
+    cons = (home.get("consumption") or {})
+    nodes = (cons.get("nodes") or []) if isinstance(cons, dict) else []
+    if not nodes:
+        logging.info("Tibber Consumption leer/fehlend: homes=%d", len(homes))
+        return []
     out = []
     for n in nodes:
         f = dt.datetime.fromisoformat(n["from"]).astimezone(LOCAL_TZ)
