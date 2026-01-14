@@ -35,6 +35,7 @@ DB_FILE         = '/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/pv_data.d
 CACHE_TODAY     = '/home/alex/E-Paper-tibber-Preisanzeige/cached_today_price.json'
 CACHE_YESTERDAY = '/home/alex/E-Paper-tibber-Preisanzeige/cached_yesterday_price.json'
 ECOFLOW_FALLBACK= '/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_status.json'
+TIBBER_LAST_QUARTER_RESPONSE = '/home/alex/E-Paper-tibber-Preisanzeige/tibber_last_quarter_response.json'
 
 logging.basicConfig(level=logging.INFO)
 SUN_TODAY = None
@@ -204,12 +205,91 @@ def tibber_priceinfo():
 
 def tibber_priceinfo_quarter_range():
     """
-    Tibber bietet aktuell keine 15-Minuten-Preise mehr per GraphQL-Enum an.
-    Wir verzichten deshalb auf den Versuch und liefern None, sodass die
-    Aufrufer automatisch auf die stündlichen Daten zurückfallen.
+    Versucht 15-Minuten-Preise über GraphQL (resolution: QUARTER_HOURLY) zu laden.
+    Liefert None zurück, wenn die API dies nicht unterstützt oder keine Daten liefert.
     """
-    logging.info("15-Minuten-Preise werden übersprungen (API-Enum nicht verfügbar)")
-    return None
+    if not getattr(api_key, "API_KEY", None) or str(api_key.API_KEY).startswith("DEIN_"):
+        logging.error("Tibber API_KEY fehlt/Platzhalter. Trage einen gültigen Token in api_key.py ein.")
+        return None
+
+    hdr = {
+        "Authorization": f"Bearer {api_key.API_KEY}",
+        "Content-Type": "application/json"
+    }
+    gql = (
+        "{ viewer { homes { id appNickname currentSubscription { "
+        "priceInfo(resolution: QUARTER_HOURLY) { "
+        "today { total startsAt } "
+        "tomorrow { total startsAt } "
+        "current { total startsAt } "
+        "} } } } }"
+    )
+
+    r = None
+    try:
+        r = requests.post(
+            'https://api.tibber.com/v1-beta/gql',
+            json={"query": gql},
+            headers=hdr,
+            timeout=20
+        )
+        http_status = r.status_code
+        try:
+            resp_json = r.json()
+        except Exception:
+            resp_json = {"raw": r.text}
+        try:
+            with open(TIBBER_LAST_QUARTER_RESPONSE, "w") as f:
+                json.dump(
+                    {
+                        "ts": dt.datetime.now(LOCAL_TZ).isoformat(),
+                        "http_status": http_status,
+                        "response": resp_json
+                    },
+                    f,
+                    indent=2,
+                    ensure_ascii=False
+                )
+        except Exception as e:
+            logging.debug("Konnte Tibber-Quarter-Response nicht schreiben: %s", e)
+
+        if http_status >= 400:
+            logging.error("Tibber HTTP %s: %s", http_status, r.text[:300])
+            return None
+
+        if isinstance(resp_json, dict) and resp_json.get("errors"):
+            logging.error("Tibber GraphQL Fehler: %s", resp_json.get("errors"))
+            return None
+
+        data = (resp_json or {}).get("data") or {}
+        viewer = data.get("viewer") or {}
+        homes = viewer.get("homes") or []
+        if not homes:
+            logging.error("Tibber Quarter: keine Homes in der Antwort")
+            return None
+
+        home = None
+        for h in homes:
+            cs = (h or {}).get("currentSubscription") or {}
+            pi = (cs.get("priceInfo") or {})
+            if pi.get("today"):
+                home = h
+                break
+        if not home:
+            logging.error("Tibber Quarter: kein Home mit priceInfo.today gefunden")
+            return None
+
+        pi = ((home.get("currentSubscription") or {}).get("priceInfo") or {})
+        return {
+            "source": "tibber_quarter",
+            "home_id": home.get("id"),
+            "today": pi.get("today") or [],
+            "tomorrow": pi.get("tomorrow") or [],
+            "current": pi.get("current") or {}
+        }
+    except Exception as e:
+        logging.error("Tibber Quarter Request fehlgeschlagen: %s", e)
+        return None
 
 def update_price_cache(pi):
     today = dt.date.today().isoformat()
@@ -1829,14 +1909,21 @@ def main():
         labels[1], len(right or [])
     )
 
-    if quarter_range and quarter_range.get("range", {}).get("nodes"):
-        nodes = quarter_range["range"].get("nodes", [])
-        left_q = _filter_range_for_date(nodes, left_date)
-        right_q = _filter_range_for_date(nodes, right_date)
+    if quarter_range and (quarter_range.get("today") or []) and (quarter_range.get("tomorrow") or []):
+        combined = (quarter_range.get("today") or []) + (quarter_range.get("tomorrow") or [])
+        left_q = _filter_range_for_date(combined, left_date)
+        right_q = _filter_range_for_date(combined, right_date)
         if left_q:
             left = left_q
         if right_q:
             right = right_q
+        logging.info(
+            "15-Minuten-Preise via Tibber: today=%d tomorrow=%d current=%s home=%s",
+            len(quarter_range.get("today") or []),
+            len(quarter_range.get("tomorrow") or []),
+            safe_get(quarter_range.get("current") or {}, "startsAt", default="-"),
+            quarter_range.get("home_id") or "-"
+        )
     
 # EcoFlow-Status früh laden (robust) – damit eco immer definiert ist
     eco = {}
