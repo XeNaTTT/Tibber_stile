@@ -1476,11 +1476,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     pv2_right = pv_right.get("pv2")
     pv_sum_right = pv_right.get("pv_sum")
 
-    pv_max = max(vmax_power(pv_sum_left), vmax_power(pv_sum_right),
-                 vmax_power(pv1_left), vmax_power(pv2_left),
-                 vmax_power(pv1_right), vmax_power(pv2_right))
-    cons_max = max(vmax_power(cons_left), vmax_power(cons_right))
-    power_scale_max = max(max(pv_max, cons_max) * 1.2, 1)
+    power_scale_max = 600
     sy_pv = H / power_scale_max
     sy_cons = H / power_scale_max
 
@@ -1524,7 +1520,8 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                     last_pt = None
                     continue
                 x = xs[i]
-                y = Y1 - pv1_list.iloc[i]*sy_pv
+                val = max(0.0, min(float(pv1_list.iloc[i]), 600.0))
+                y = Y1 - val*sy_pv
                 if last_pt is not None:
                     d.line((last_pt[0], last_pt[1], x, y), fill=0, width=1)
                 last_pt = (x, y)
@@ -1536,7 +1533,8 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                     last_pt = None
                     continue
                 x = xs[i]
-                y = Y1 - pv2_list.iloc[i]*sy_pv
+                val = max(0.0, min(float(pv2_list.iloc[i]), 600.0))
+                y = Y1 - val*sy_pv
                 if last_pt is not None:
                     d.line((last_pt[0], last_pt[1], x, y), fill=0, width=1)
                 last_pt = (x, y)
@@ -1548,7 +1546,8 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                     last_pt = None
                     continue
                 x = xs[i]
-                y = Y1 - pv_sum_list.iloc[i]*sy_pv
+                val = max(0.0, min(float(pv_sum_list.iloc[i]), 600.0))
+                y = Y1 - val*sy_pv
                 if last_pt is not None:
                     d.line((last_pt[0], last_pt[1], x, y), fill=0, width=2)
                 last_pt = (x, y)
@@ -1560,7 +1559,8 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                     last_pt = None
                     continue
                 x = xs[i]
-                y = Y1 - cons_list.iloc[i]*sy_cons
+                val = max(0.0, min(float(cons_list.iloc[i]), 600.0))
+                y = Y1 - val*sy_cons
                 if last_pt is not None:
                     draw_dashed_line(d, last_pt[0], last_pt[1], x, y, dash=4, gap=3, width=1)
                 last_pt = (x, y)
