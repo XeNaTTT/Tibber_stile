@@ -37,6 +37,8 @@ CACHE_YESTERDAY = '/home/alex/E-Paper-tibber-Preisanzeige/cached_yesterday_price
 ECOFLOW_FALLBACK= '/home/alex/E-Paper-tibber-Preisanzeige/ecoflow_status.json'
 
 logging.basicConfig(level=logging.INFO)
+SUN_TODAY = None
+SUN_TOMORROW = None
 
 # ---------- Utils ----------
 def _to_float(x):
@@ -366,6 +368,122 @@ def get_pv_series_db(slots_dt):
         else:
             series_map[key] = _mask_future(series)
     return series_map
+
+
+def pv_daily_energy_wh_from_db(date_local, db_file=DB_FILE):
+    start_local = dt.datetime.combine(date_local, dt.time.min, tzinfo=LOCAL_TZ)
+    end_local = start_local + dt.timedelta(days=1) - dt.timedelta(seconds=1)
+    start_utc = int(start_local.astimezone(dt.timezone.utc).timestamp())
+    end_utc = int(end_local.astimezone(dt.timezone.utc).timestamp())
+
+    conn = sqlite3.connect(db_file)
+    try:
+        df = pd.read_sql_query(
+            "SELECT ts, pv_sum_w FROM pv_log WHERE ts BETWEEN ? AND ?",
+            conn,
+            params=(start_utc, end_utc),
+        )
+    except Exception as e:
+        conn.close()
+        logging.warning("PV daily energy query failed (%s): %s", date_local, e)
+        return None
+    conn.close()
+
+    if df.empty:
+        return None
+
+    df["ts"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(LOCAL_TZ)
+    df.set_index("ts", inplace=True)
+    df.sort_index(inplace=True)
+    df = df.resample("15T").mean().ffill().fillna(0)
+    energy_wh = float((df["pv_sum_w"] * 0.25).sum())
+    return energy_wh
+
+
+def pv_profile_normalized_from_db(date_local, slots_dt_template, db_file=DB_FILE):
+    start_local = dt.datetime.combine(date_local, dt.time.min, tzinfo=LOCAL_TZ)
+    end_local = start_local + dt.timedelta(days=1) - dt.timedelta(seconds=1)
+    start_utc = int(start_local.astimezone(dt.timezone.utc).timestamp())
+    end_utc = int(end_local.astimezone(dt.timezone.utc).timestamp())
+
+    conn = sqlite3.connect(db_file)
+    try:
+        df = pd.read_sql_query(
+            "SELECT ts, pv_sum_w FROM pv_log WHERE ts BETWEEN ? AND ?",
+            conn,
+            params=(start_utc, end_utc),
+        )
+    except Exception as e:
+        conn.close()
+        logging.warning("PV profile query failed (%s): %s", date_local, e)
+        return None
+    conn.close()
+
+    if df.empty:
+        return None
+
+    df["ts"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(LOCAL_TZ)
+    df.set_index("ts", inplace=True)
+    df.sort_index(inplace=True)
+    df = df.resample("15T").mean().ffill().fillna(0)
+    profile = df["pv_sum_w"].reindex(slots_dt_template, method="ffill").fillna(0)
+    profile = profile.clip(lower=0)
+    energy_wh = float((profile * 0.25).sum())
+    if energy_wh < 50:
+        return None
+    total_w = float(profile.sum())
+    if total_w <= 0:
+        return None
+    profile_norm = profile / total_w
+    return pd.Series(profile_norm, index=slots_dt_template)
+
+
+def pv_forecast_series_for_date(target_date, slots_dt):
+    if not slots_dt:
+        return pd.Series(dtype=float, index=slots_dt)
+    slots_dt_template = slots_dt
+    profiles = []
+    for days_back in range(1, 15):
+        day = target_date - dt.timedelta(days=days_back)
+        shifted_slots = [
+            dt.datetime.combine(day, slot.astimezone(LOCAL_TZ).timetz())
+            for slot in slots_dt_template
+        ]
+        p = pv_profile_normalized_from_db(day, shifted_slots)
+        if p is not None and len(p) == len(slots_dt_template):
+            p = p.copy()
+            p.index = slots_dt_template
+            profiles.append(p)
+
+    if not profiles:
+        return pd.Series([np.nan] * len(slots_dt), index=slots_dt)
+
+    profile_df = pd.concat(profiles, axis=1)
+    median_profile = profile_df.median(axis=1)
+
+    energies = []
+    for days_back in range(1, 8):
+        day = target_date - dt.timedelta(days=days_back)
+        e_wh = pv_daily_energy_wh_from_db(day)
+        if e_wh is not None and e_wh > 50:
+            energies.append(e_wh)
+    base_wh = float(np.mean(energies)) if energies else 0.0
+
+    sun_today = globals().get("SUN_TODAY")
+    sun_tomorrow = globals().get("SUN_TOMORROW")
+    scale = 1.0
+    if sun_today is not None and sun_tomorrow is not None:
+        denom = max(float(sun_today), 0.2)
+        scale = float(sun_tomorrow) / denom
+        scale = max(0.2, min(1.8, scale))
+
+    forecast_wh = base_wh * scale
+    median_sum = float(median_profile.sum())
+    if median_sum <= 0:
+        return pd.Series([np.nan] * len(slots_dt), index=slots_dt)
+    median_profile = median_profile / max(median_sum, 1e-9)
+    w_series = median_profile * (forecast_wh / 0.25)
+    return pd.Series(w_series, index=slots_dt)
 
 def pv_db_stats(slots_dt, label, db_file=DB_FILE):
     if not slots_dt:
@@ -1742,9 +1860,6 @@ def main():
     pv_db_stats(tl_dt, labels[0])
     pv_db_stats(tr_dt, labels[1])
 
-    pv_left = get_pv_series_db(tl_dt)
-    pv_right = get_pv_series_db(tr_dt)
-
     try:
         hourly = tibber_hourly_consumption(last=48)
     except Exception as e:
@@ -1763,10 +1878,24 @@ def main():
     cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
     sun_today, sun_tomorrow = sunshine_hours_both(api_key.LAT, api_key.LON)
+    global SUN_TODAY, SUN_TOMORROW
+    SUN_TODAY = sun_today
+    SUN_TOMORROW = sun_tomorrow
     logging.info(
         "Wetterdaten via Open-Meteo (lat=%.4f, lon=%.4f): heute=%.1f h, morgen=%.1f h",
         api_key.LAT, api_key.LON, sun_today, sun_tomorrow
     )
+
+    pv_left = get_pv_series_db(tl_dt)
+    if labels[1] == "Morgen":
+        pv_sum_forecast = pv_forecast_series_for_date(right_date, tr_dt)
+        pv_right = {
+            "pv1": pd.Series([np.nan] * len(tr_dt), index=tr_dt),
+            "pv2": pd.Series([np.nan] * len(tr_dt), index=tr_dt),
+            "pv_sum": pv_sum_forecast,
+        }
+    else:
+        pv_right = get_pv_series_db(tr_dt)
 
     # Canvas
     img  = Image.new('1', (w, h), 255)
