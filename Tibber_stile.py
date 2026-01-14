@@ -1838,7 +1838,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                 return tl, X0
             if len(tr) > 1 and tr[0] <= marker_dt <= tr[-1]:
                 return tr, X0 + PW
-            return None, None
+            return tr, X0 + PW
 
         arr, x0_panel = pick_panel_for_marker()
         if arr is not None:
@@ -1850,9 +1850,15 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
                 slot_w = PW / (n - 1)
                 px = x0_panel + i_float * slot_w
                 py = _price_to_y(cur_price)
-                r = 4
+                draw_dashed_line(d, px, py, px, Y1 + 4, dash=2, gap=3, fill=0, width=1)
+                r = 6
                 d.ellipse((px - r, py - r, px + r, py + r), fill=0)
-                d.text((px + r + 2, py - r - 2), f"{cur_price/100:.2f}", font=fonts['tiny'], fill=0)
+                label = f"{cur_price/100:.2f} ct  {marker_dt.strftime('%H:%M')}"
+                tx = px + r + 4
+                ty = py - r - 10
+                tx = min(tx, X1 - 160)
+                ty = max(ty, Y0 - 18)
+                d.text((tx, ty), label, font=fonts['tiny'], fill=0)
 
 # ---------- Main ----------
 def main():
