@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os, sqlite3, datetime as dt, math, json, argparse, logging
+import api_key
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
@@ -108,7 +109,9 @@ def sunshine_hours_both(lat: float, lon: float, model: str = "icon_seamless"):
     r = requests.get(url, timeout=12)
     r.raise_for_status()
     j = r.json()
-    arr = (j.get("daily", {}).get("sunshine_duration")) or []
+    arr = j.get("daily", {}).get("sunshine_duration")
+    if not arr or len(arr) < 2:
+        raise ValueError("sunshine_duration missing or incomplete in weather response")
     def _h(idx):
         try:
             sec = arr[idx]
@@ -197,6 +200,7 @@ def pv_forecast_series_for_tomorrow(
     # 3) Wetter-Skalierung
     scale = 1.0
     weather = None
+    weather_error = None
     sun_today_h = None
     sun_tomorrow_h = None
     if force_scale is not None:
@@ -211,6 +215,7 @@ def pv_forecast_series_for_tomorrow(
             scale = float(sun_tom) / denom
             scale = max(0.2, min(1.8, scale))
         except Exception as e:
+            weather_error = str(e)
             logging.info("Wetter-Skalierung nicht verfügbar (%s) -> scale=1.0", e)
             scale = 1.0
 
@@ -241,6 +246,7 @@ def pv_forecast_series_for_tomorrow(
         "peak_w": peak_w,
         "peak_time": peak_time,
         "weather": weather,
+        "weather_error": weather_error,
     }
     return w_series, meta
 
@@ -277,6 +283,7 @@ def render_forecast_png(series_w: pd.Series, meta: dict, outfile: str, width=800
     used_days = meta.get("used_days", [])
     sun_today_h = meta.get("sun_today_h", None)
     sun_tomorrow_h = meta.get("sun_tomorrow_h", None)
+    weather_error = meta.get("weather_error")
     profile_sum = float(meta.get("profile_sum", 0.0))
     peak_w = float(meta.get("peak_w", 0.0))
     energy_check_wh = float(meta.get("energy_check_wh", 0.0))
@@ -299,6 +306,8 @@ def render_forecast_png(series_w: pd.Series, meta: dict, outfile: str, width=800
         f"peak_w (max of forecast series): {peak_w:.0f} W",
         f"y_max: {y_max:.0f} W",
     ]
+    if weather_error:
+        steps_lines.append(f"weather_error: {weather_error}")
     block_x = margin
     block_y = 40
     line_h = 14
@@ -402,6 +411,11 @@ def main():
     ap.add_argument("--epd", action="store_true", help="Bild aufs Waveshare EPD 7.5 V2 ausgeben")
     ap.add_argument("--force-scale", type=float, default=None, help="Optional: Wetter-Scale erzwingen (Debug)")
     args = ap.parse_args()
+
+    if args.lat is None:
+        args.lat = getattr(api_key, "LAT", None)
+    if args.lon is None:
+        args.lon = getattr(api_key, "LON", None)
 
     series, meta = pv_forecast_series_for_tomorrow(
         lat=args.lat, lon=args.lon, db_file=args.db, force_scale=args.force_scale
