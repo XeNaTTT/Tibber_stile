@@ -1836,7 +1836,10 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
 
     # Minutengenauer Marker (horizontale Interpolation)
     if cur_price is not None:
-        marker_dt = cur_dt or dt.datetime.now(LOCAL_TZ)
+        now_dt = dt.datetime.now(LOCAL_TZ)
+        marker_dt = now_dt
+        if cur_dt is not None and cur_dt > now_dt:
+            marker_dt = cur_dt
 
         def pick_panel_for_marker():
             if len(tl) > 1 and tl[0].date() == marker_dt.date():
