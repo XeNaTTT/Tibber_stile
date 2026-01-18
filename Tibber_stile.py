@@ -184,12 +184,26 @@ def _get_weather_icon_image(bucket, is_day, invert=False, bitreverse=False):
         return None
     path = os.path.join(WEATHER_ICON_DIR, filename)
     varname = f"gImage_{os.path.splitext(filename)[0]}"
-    cache_key = (path, invert, bitreverse)
+    data = load_c_bitmap(path, varname)
+    w = WEATHER_ICON_WIDTH
+    bytes_per_row = (w + 7) // 8
+    if len(data) % bytes_per_row != 0:
+        raise RuntimeError(
+            "Ungültige Icon-Datenlänge: len(data)=%d, bytes_per_row=%d"
+            % (len(data), bytes_per_row)
+        )
+    h = len(data) // bytes_per_row
+    if h < 50 or h > 400:
+        logging.warning(
+            "Auffällige Icon-Höhe berechnet: %d (len(data)=%d, bytes_per_row=%d)",
+            h,
+            len(data),
+            bytes_per_row,
+        )
+    cache_key = (path, w, h, invert, bitreverse)
     if cache_key in _C_IMAGE_CACHE:
         return _C_IMAGE_CACHE[cache_key]
-    data = load_c_bitmap(path, varname)
-    img = c_bitmap_to_image(data, WEATHER_ICON_WIDTH, WEATHER_ICON_HEIGHT,
-                            invert=invert, bitreverse=bitreverse)
+    img = c_bitmap_to_image(data, w, h, invert=invert, bitreverse=bitreverse)
     _C_IMAGE_CACHE[cache_key] = img
     return img
 
