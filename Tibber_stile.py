@@ -779,72 +779,38 @@ def upsample_hourly_to_quarter(ts_15min, hourly_list):
     return pd.Series(out)
 
 # ---------- Wetter ----------
-def _pick_current_weather_code(times, codes, now=None):
-    if not times or not codes:
-        return None
-    now = now or dt.datetime.now(LOCAL_TZ)
-    best_idx = None
-    best_delta = None
-    for idx, t_str in enumerate(times):
-        try:
-            t = dt.datetime.fromisoformat(t_str)
-            if t.tzinfo is None:
-                t = t.replace(tzinfo=LOCAL_TZ)
-        except Exception:
-            continue
-        delta = abs((t - now).total_seconds())
-        if best_delta is None or delta < best_delta:
-            best_delta = delta
-            best_idx = idx
-    if best_idx is None:
-        return None
-    try:
-        return int(codes[best_idx])
-    except Exception:
-        return None
-
-
-def sunshine_hours_both(lat, lon, model=None):
+def fetch_openmeteo_hourly(lat, lon):
     """
-    Liefert (heute_h, morgen_h, weather_code) als floats (h) und int.
-    Nutzt Open-Meteo sunshine_duration (Sekunden -> Stunden) und weathercode.
+    Holt Open-Meteo stündliche Wettercodes + Tag/Nacht.
+    Return: {datetime_local_hour: (code:int, is_day:bool)}
     """
     try:
-        model = model or getattr(api_key, "SUN_MODEL", "icon_seamless")
         url = (
             "https://api.open-meteo.com/v1/forecast"
             f"?latitude={lat}&longitude={lon}"
-            "&daily=sunshine_duration"
-            "&hourly=weathercode"
+            "&hourly=weathercode,is_day"
             "&timezone=Europe%2FBerlin"
-            f"&models={model}"
         )
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         j = r.json()
-        try:
-            with open("/home/alex/E-Paper-tibber-Preisanzeige/openmeteo_last.json", "w") as f:
-                json.dump(j, f, indent=2)
-        except Exception:
-            pass
-        arr = (j.get("daily", {}).get("sunshine_duration")) or []
-        def _h(idx):
-            try:
-                sec = arr[idx]
-                if sec is None:
-                    return 0.0
-                return round(float(sec)/3600.0, 1)
-            except Exception:
-                return 0.0
         hourly = j.get("hourly", {}) or {}
-        weather_code = _pick_current_weather_code(
-            hourly.get("time") or [],
-            hourly.get("weathercode") or []
-        )
-        return _h(0), _h(1), weather_code
+        times = hourly.get("time") or []
+        codes = hourly.get("weathercode") or []
+        is_day_list = hourly.get("is_day") or []
+        hourly_map = {}
+        for t_str, code, is_day in zip(times, codes, is_day_list):
+            try:
+                t = dt.datetime.fromisoformat(t_str)
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=LOCAL_TZ)
+                hourly_map[t] = (int(code), bool(is_day))
+            except Exception:
+                continue
+        return hourly_map
     except Exception as e:
-        logging.error("Sunshine fetch failed: %s", e)
-        return 0.0, 0.0, None
+        logging.error("Open-Meteo hourly fetch failed: %s", e)
+        return {}
 
 # ---------- EcoFlow (BKW/PowerStream, signierte Requests) ----------
 import time, uuid, hmac, hashlib
@@ -1650,120 +1616,172 @@ def _smooth_series(series, window=3):
     except Exception:
         return series
 
-def _weather_kind_from_code(code):
-    if code is None:
-        return "cloud"
+def meteo_bucket(code):
     try:
         code = int(code)
     except Exception:
-        return "cloud"
+        return "cloudy"
     if code == 0:
-        return "sun"
-    if code in (1, 2, 3, 45, 48):
-        return "cloud"
-    if code in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99):
+        return "clear"
+    if code in (1, 2):
+        return "partly"
+    if code == 3:
+        return "cloudy"
+    if code in (45, 48):
+        return "fog"
+    if code in (51, 53, 55, 56, 57):
+        return "drizzle"
+    if code in (61, 63, 65, 66, 67, 80, 81, 82):
         return "rain"
     if code in (71, 73, 75, 77, 85, 86):
         return "snow"
-    return "cloud"
+    if code in (95, 96, 99):
+        return "thunder"
+    return "cloudy"
 
 
-def _draw_sun_icon(d, cx, cy, r):
-    d.ellipse((cx-r, cy-r, cx+r, cy+r), outline=0, width=2)
-    for ang in range(0, 360, 45):
-        rad = math.radians(ang)
-        d.line((cx+math.cos(rad)*r*1.6, cy+math.sin(rad)*r*1.6,
-                cx+math.cos(rad)*r*2.4, cy+math.sin(rad)*r*2.4), fill=0, width=2)
+def draw_weather_icon(draw, x, y, size, code, is_day, fill=0):
+    scale = max(1.0, float(size) / 40.0)
+    width = 2
+    stroke = fill
 
+    def sx(v):
+        return int(round(x + v * scale))
 
-def _draw_cloud_icon(d, x, y):
-    base_y = y + 26
-    d.ellipse((x+4, base_y-12, x+4+16, base_y+4), outline=0, width=2)
-    d.ellipse((x+14, base_y-16, x+14+20, base_y+4), outline=0, width=2)
-    d.ellipse((x+26, base_y-12, x+26+16, base_y+4), outline=0, width=2)
-    d.line((x+6, base_y+4, x+42, base_y+4), fill=0, width=2)
+    def sy(v):
+        return int(round(y + v * scale))
 
+    def draw_sun(cx, cy, r):
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=stroke, width=width)
+        for ang in range(0, 360, 45):
+            rad = math.radians(ang)
+            x1 = cx + math.cos(rad) * (r + 4 * scale)
+            y1 = cy + math.sin(rad) * (r + 4 * scale)
+            x2 = cx + math.cos(rad) * (r + 10 * scale)
+            y2 = cy + math.sin(rad) * (r + 10 * scale)
+            draw.line((x1, y1, x2, y2), fill=stroke, width=width)
 
-def _draw_rain_icon(d, x, y):
-    _draw_cloud_icon(d, x, y)
-    drop_y = y + 34
-    for offset in (10, 20, 30):
-        d.line((x+offset, drop_y, x+offset-2, drop_y+8), fill=0, width=2)
+    def draw_moon(cx, cy, r):
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=stroke, width=width)
+        cut_r = int(r * 0.9)
+        draw.ellipse((cx - cut_r + int(3 * scale), cy - cut_r,
+                      cx + cut_r + int(3 * scale), cy + cut_r), fill=255, outline=255)
 
+    def draw_cloud(cx, cy, w, h):
+        r1 = int(w * 0.22)
+        r2 = int(w * 0.26)
+        r3 = int(w * 0.20)
+        base_y = cy + int(h * 0.55)
+        draw.ellipse((cx - int(w * 0.4), base_y - r1, cx - int(w * 0.4) + 2 * r1,
+                      base_y + r1), outline=stroke, width=width)
+        draw.ellipse((cx - int(w * 0.1), base_y - r2 - int(h * 0.2), cx - int(w * 0.1) + 2 * r2,
+                      base_y + r2 - int(h * 0.2)), outline=stroke, width=width)
+        draw.ellipse((cx + int(w * 0.2), base_y - r3, cx + int(w * 0.2) + 2 * r3,
+                      base_y + r3), outline=stroke, width=width)
+        draw.line((cx - int(w * 0.45), base_y + r1, cx + int(w * 0.55), base_y + r1),
+                  fill=stroke, width=width)
 
-def _draw_snow_icon(d, x, y):
-    _draw_cloud_icon(d, x, y)
-    flake_y = y + 36
-    for offset in (12, 22, 32):
-        d.line((x+offset-2, flake_y-2, x+offset+2, flake_y+2), fill=0, width=2)
-        d.line((x+offset-2, flake_y+2, x+offset+2, flake_y-2), fill=0, width=2)
+    def draw_rain(cx, cy, w):
+        start_y = cy + int(12 * scale)
+        for offset in (-10, 0, 10):
+            x0 = cx + int(offset * scale)
+            draw.line((x0, start_y, x0 - int(4 * scale), start_y + int(12 * scale)),
+                      fill=stroke, width=width)
 
+    def draw_snow(cx, cy):
+        start_y = cy + int(12 * scale)
+        for offset in (-10, 0, 10):
+            x0 = cx + int(offset * scale)
+            draw.line((x0 - int(3 * scale), start_y - int(3 * scale),
+                       x0 + int(3 * scale), start_y + int(3 * scale)),
+                      fill=stroke, width=width)
+            draw.line((x0 - int(3 * scale), start_y + int(3 * scale),
+                       x0 + int(3 * scale), start_y - int(3 * scale)),
+                      fill=stroke, width=width)
 
-def _draw_sun_icon_v2(d, cx, cy, r):
-    d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=0, width=3)
-    for ang in range(0, 360, 45):
-        rad = math.radians(ang)
-        x1 = cx + math.cos(rad) * (r + 4)
-        y1 = cy + math.sin(rad) * (r + 4)
-        x2 = cx + math.cos(rad) * (r + 10)
-        y2 = cy + math.sin(rad) * (r + 10)
-        d.line((x1, y1, x2, y2), fill=0, width=3)
+    def draw_lightning(cx, cy):
+        pts = [
+            (cx - int(4 * scale), cy + int(2 * scale)),
+            (cx + int(1 * scale), cy + int(2 * scale)),
+            (cx - int(2 * scale), cy + int(14 * scale)),
+            (cx + int(6 * scale), cy + int(14 * scale)),
+            (cx - int(2 * scale), cy + int(28 * scale)),
+        ]
+        draw.line(pts, fill=stroke, width=width)
 
+    def draw_fog(cx, cy, w):
+        for idx in range(3):
+            y0 = cy + int(idx * 6 * scale)
+            draw.line((cx - int(w * 0.4), y0, cx + int(w * 0.4), y0),
+                      fill=stroke, width=width)
 
-def _draw_cloud_icon_v2(d, x, y):
-    cloud_w = 52
-    cloud_h = 26
-    base_y = y + cloud_h
-    d.arc((x, y + 10, x + 22, y + 32), start=180, end=360, fill=0, width=3)
-    d.arc((x + 12, y, x + 40, y + 28), start=180, end=360, fill=0, width=3)
-    d.arc((x + 28, y + 10, x + 52, y + 32), start=180, end=360, fill=0, width=3)
-    d.line((x + 6, base_y, x + cloud_w - 6, base_y), fill=0, width=3)
+    bucket = meteo_bucket(code)
+    is_day = bool(is_day) if is_day is not None else True
+    center_x = sx(20)
+    center_y = sy(18)
+    cloud_w = int(34 * scale)
+    cloud_h = int(20 * scale)
 
-
-def _draw_partly_cloudy_icon(d, x, y):
-    _draw_sun_icon_v2(d, x + 12, y + 12, 7)
-    _draw_cloud_icon_v2(d, x + 8, y + 6)
-
-
-def _draw_rain_icon_v2(d, x, y):
-    _draw_cloud_icon_v2(d, x, y)
-    drop_y = y + 32
-    for offset in (14, 26, 38):
-        d.line((x + offset, drop_y, x + offset - 3, drop_y + 8), fill=0, width=3)
-
-
-def _draw_snow_icon_v2(d, x, y):
-    _draw_cloud_icon_v2(d, x, y)
-    flake_y = y + 34
-    for offset in (16, 28, 40):
-        d.line((x + offset - 3, flake_y - 3, x + offset + 3, flake_y + 3), fill=0, width=2)
-        d.line((x + offset - 3, flake_y + 3, x + offset + 3, flake_y - 3), fill=0, width=2)
-
-
-def draw_weather_box(d, x, y, w, h, fonts, sun_today, sun_tomorrow=None, weather_code=None):
-    d.rectangle((x, y, x+w, y+h), outline=0, width=2)
-    icon_x = x + 10
-    icon_y = y + int((h - 42) / 2)
-    kind = _weather_kind_from_code(weather_code)
-    if kind == "sun":
-        _draw_sun_icon_v2(d, icon_x + 20, icon_y + 20, 10)
-    elif kind == "rain":
-        _draw_rain_icon_v2(d, icon_x, icon_y)
-    elif kind == "snow":
-        _draw_snow_icon_v2(d, icon_x, icon_y)
+    if bucket == "clear":
+        if is_day:
+            draw_sun(center_x, center_y, int(8 * scale))
+        else:
+            draw_moon(center_x, center_y, int(8 * scale))
+    elif bucket == "partly":
+        if is_day:
+            draw_sun(sx(14), sy(12), int(7 * scale))
+        else:
+            draw_moon(sx(14), sy(12), int(7 * scale))
+        draw_cloud(sx(20), sy(16), cloud_w, cloud_h)
+    elif bucket == "fog":
+        draw_fog(sx(20), sy(16), cloud_w)
+    elif bucket == "drizzle":
+        draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
+        draw_rain(sx(20), sy(24), cloud_w)
+    elif bucket == "rain":
+        draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
+        draw_rain(sx(20), sy(24), cloud_w)
+    elif bucket == "snow":
+        draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
+        draw_snow(sx(20), sy(24))
+    elif bucket == "thunder":
+        draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
+        draw_lightning(sx(20), sy(20))
     else:
-        _draw_partly_cloudy_icon(d, icon_x, icon_y)
+        draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
+
+
+def draw_weather_box(d, x, y, w, h, fonts, hourly_map):
+    d.rectangle((x, y, x + w, y + h), outline=0, width=2)
+    icon_size = 40
+    icon_x = x + 10
+    icon_y = y + int((h - icon_size) / 2)
+
+    now = dt.datetime.now(LOCAL_TZ)
+    hour = now.replace(minute=0, second=0, microsecond=0)
+    code, is_day = hourly_map.get(hour, (None, None))
+    if code is not None:
+        draw_weather_icon(d, icon_x, icon_y, icon_size, code, is_day, fill=0)
+    else:
+        draw_weather_icon(d, icon_x, icon_y, icon_size, 3, True, fill=0)
+
     title = "Wetter"
     title_w, title_h = _text_size(d, title, fonts['bold'])
     text_x = x + 60
     lines = []
-    try:  t_val = float(sun_today)    if sun_today    is not None else 0.0
-    except: t_val = 0.0
-    try:  m_val = float(sun_tomorrow) if sun_tomorrow is not None else None
-    except: m_val = None
-    lines.append(f"Sonnenstunden heute: {t_val:.1f} h")
-    if m_val is not None:
-        lines.append(f"Sonnenstunden morgen: {m_val:.1f} h")
+    if ECO_DEBUG and code is not None:
+        lines.append(f"Code: {code}")
+
+    def bucket_for(dt_target):
+        code_day, _ = hourly_map.get(dt_target, (None, None))
+        return meteo_bucket(code_day) if code_day is not None else "-"
+
+    today_noon = dt.datetime(now.year, now.month, now.day, 12, tzinfo=LOCAL_TZ)
+    tomorrow = now + dt.timedelta(days=1)
+    tomorrow_noon = dt.datetime(tomorrow.year, tomorrow.month, tomorrow.day, 12, tzinfo=LOCAL_TZ)
+    lines.append(f"Heute: {bucket_for(today_noon)}")
+    lines.append(f"Morgen: {bucket_for(tomorrow_noon)}")
+
     line_heights = [title_h] + [_text_size(d, line, fonts['small'])[1] for line in lines]
     total_h = sum(line_heights) + 6
     start_y = y + max(6, int((h - total_h) / 2))
@@ -2232,13 +2250,10 @@ def main():
     cons_left = upsample_hourly_to_quarter(tl_dt, hourly)
     cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
-    sun_today, sun_tomorrow, weather_code = sunshine_hours_both(api_key.LAT, api_key.LON)
-    global SUN_TODAY, SUN_TOMORROW
-    SUN_TODAY = sun_today
-    SUN_TOMORROW = sun_tomorrow
+    hourly_map = fetch_openmeteo_hourly(api_key.LAT, api_key.LON)
     logging.info(
-        "Wetterdaten via Open-Meteo (lat=%.4f, lon=%.4f): heute=%.1f h, morgen=%.1f h, code=%s",
-        api_key.LAT, api_key.LON, sun_today, sun_tomorrow, weather_code
+        "Wetterdaten via Open-Meteo (lat=%.4f, lon=%.4f): hourly entries=%d",
+        api_key.LAT, api_key.LON, len(hourly_map)
     )
 
     pv_left = get_pv_series_db(tl_dt)
@@ -2269,7 +2284,7 @@ def main():
     margin = 10
     top_h  = 70
     box_w  = (w - margin*3)//2
-    draw_weather_box(d, margin, margin, box_w, top_h, fonts, sun_today, sun_tomorrow, weather_code)
+    draw_weather_box(d, margin, margin, box_w, top_h, fonts, hourly_map)
     draw_ecoflow_box(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
 
     # Info-Zeile tiefer und zentriert
