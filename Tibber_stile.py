@@ -47,9 +47,6 @@ DITHER_MODE = "BAYER"  # "BAYER" or "FS"
 BAYER_MATRIX = 8       # 8 or 16
 GAMMA = 1.10
 CONTRAST = 1.08
-TRMNL_STYLE = True
-DITHER_METHOD = "bayer8"  # "bayer8" or "floyd"
-SCENE_INTENSITY = 0.6
 
 # Weather icon config
 WEATHER_ICON_DIR = "/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/Wettersymbole"
@@ -1776,246 +1773,6 @@ def render_to_epd(img_l):
     return out
 
 
-def _scene_tone(value):
-    intensity = max(0.0, min(1.0, float(SCENE_INTENSITY)))
-    value = max(0, min(255, int(round(value))))
-    return int(round(255 - (255 - value) * intensity))
-
-
-def _pattern_tile(pattern, base_value, accent_value, size=8):
-    tile = Image.new("L", (size, size), base_value)
-    draw = ImageDraw.Draw(tile)
-    if pattern == "diag":
-        for offset in range(-size, size * 2, 4):
-            draw.line((offset, 0, offset + size, size), fill=accent_value, width=1)
-    elif pattern == "dot":
-        for y in range(1, size, 4):
-            for x in range(1, size, 4):
-                tile.putpixel((x, y), accent_value)
-    elif pattern == "cross":
-        draw.line((0, 0, size, size), fill=accent_value, width=1)
-        draw.line((0, size, size, 0), fill=accent_value, width=1)
-    return tile
-
-
-def _apply_pattern_fill(img, mask, base_mask, base_value, pattern):
-    if mask is None:
-        return
-    safe_mask = ImageChops.multiply(mask, base_mask) if base_mask is not None else mask
-    tile = _pattern_tile(pattern, base_value, max(0, base_value - 30))
-    pattern_img = Image.new("L", img.size, 0)
-    tw, th = tile.size
-    for y in range(0, img.size[1], th):
-        for x in range(0, img.size[0], tw):
-            pattern_img.paste(tile, (x, y))
-    img.paste(pattern_img, (0, 0), safe_mask)
-
-
-def finalize_to_1bit(base_img_l, method="bayer8"):
-    img_l = base_img_l.convert("L") if base_img_l.mode != "L" else base_img_l.copy()
-    if GAMMA and CONTRAST and (GAMMA != 1.0 or CONTRAST != 1.0):
-        lut = []
-        gamma = float(GAMMA)
-        contrast = float(CONTRAST)
-        for i in range(256):
-            v = i / 255.0
-            if gamma != 1.0:
-                v = pow(v, 1.0 / gamma)
-            if contrast != 1.0:
-                v = (v - 0.5) * contrast + 0.5
-            v = max(0.0, min(1.0, v))
-            lut.append(int(round(v * 255)))
-        img_l = img_l.point(lut)
-    if method == "floyd":
-        return img_l.convert("1", dither=Image.FLOYDSTEINBERG)
-    matrix = _get_bayer_matrix(8)
-    size = len(matrix)
-    threshold_scale = 255.0 / (size * size)
-    w, h = img_l.size
-    out = Image.new("1", (w, h), 1)
-    src = img_l.load()
-    dst = out.load()
-    for y in range(h):
-        row = matrix[y % size]
-        for x in range(w):
-            threshold = (row[x % size] + 0.5) * threshold_scale
-            dst[x, y] = 0 if src[x, y] < threshold else 255
-    return out
-
-
-def _panel_weather_state(hourly_map, target_date):
-    if not hourly_map:
-        return "cloudy", True
-    entries = [
-        (code, is_day)
-        for t, (code, is_day) in hourly_map.items()
-        if t.date() == target_date and 9 <= t.hour <= 15
-    ]
-    if entries:
-        codes = [c for c, _ in entries if c is not None]
-        day_flags = [bool(d) for _, d in entries]
-        code = int(round(float(np.median(codes)))) if codes else None
-        is_day = sum(day_flags) >= (len(day_flags) / 2) if day_flags else True
-    else:
-        candidates = [
-            (t, code, is_day)
-            for t, (code, is_day) in hourly_map.items()
-            if t.date() == target_date
-        ]
-        if candidates:
-            t, code, is_day = min(candidates, key=lambda item: abs(item[0].hour - 12))
-        else:
-            code, is_day = None, True
-    return meteo_bucket(code), bool(is_day) if is_day is not None else True
-
-
-def draw_landscape(draw_l, panel_bbox):
-    x0, y0, x1, y1 = map(int, panel_bbox)
-    w = x1 - x0
-    h = y1 - y0
-    base_y = y0 + int(h * 0.68)
-    hill_color = _scene_tone(150)
-    ridge_color = _scene_tone(170)
-    points = [
-        (x0, base_y),
-        (x0 + int(w * 0.25), base_y - int(h * 0.08)),
-        (x0 + int(w * 0.5), base_y + int(h * 0.04)),
-        (x0 + int(w * 0.75), base_y - int(h * 0.06)),
-        (x1, base_y + int(h * 0.02)),
-    ]
-    draw_l.line(points, fill=hill_color, width=1)
-    ridge_y = base_y + int(h * 0.12)
-    draw_l.line((x0, ridge_y, x1, ridge_y), fill=ridge_color, width=1)
-    mast_color = _scene_tone(120)
-    for rel in (0.3, 0.52, 0.74):
-        mx = x0 + int(w * rel)
-        draw_l.line((mx, ridge_y, mx, ridge_y - int(h * 0.18)), fill=mast_color, width=1)
-        draw_l.line(
-            (mx - int(w * 0.02), ridge_y - int(h * 0.12),
-             mx + int(w * 0.02), ridge_y - int(h * 0.12)),
-            fill=mast_color,
-            width=1,
-        )
-
-
-def draw_weather_motifs(draw_l, panel_bbox, bucket, is_day):
-    x0, y0, x1, y1 = map(int, panel_bbox)
-    w = x1 - x0
-    h = y1 - y0
-    sky_top = y0 + int(h * 0.06)
-    sky_bottom = y0 + int(h * 0.55)
-    motif_color = _scene_tone(110)
-    cloud_fill = _scene_tone(200)
-    cloud_outline = _scene_tone(150)
-
-    def cloud(cx, cy, size):
-        r1 = int(size * 0.28)
-        r2 = int(size * 0.34)
-        r3 = int(size * 0.24)
-        draw_l.ellipse((cx - int(size * 0.45), cy - r1, cx - int(size * 0.45) + 2 * r1,
-                        cy + r1), fill=cloud_fill, outline=cloud_outline)
-        draw_l.ellipse((cx - int(size * 0.1), cy - r2 - int(size * 0.15),
-                        cx - int(size * 0.1) + 2 * r2, cy + r2 - int(size * 0.15)),
-                       fill=cloud_fill, outline=cloud_outline)
-        draw_l.ellipse((cx + int(size * 0.2), cy - r3, cx + int(size * 0.2) + 2 * r3,
-                        cy + r3), fill=cloud_fill, outline=cloud_outline)
-        draw_l.line((cx - int(size * 0.5), cy + r1, cx + int(size * 0.6), cy + r1),
-                    fill=cloud_outline, width=1)
-
-    if bucket in ("clear", "partly"):
-        sun_r = int(min(w, h) * 0.08)
-        sun_x = x0 + int(w * 0.78)
-        sun_y = sky_top + int((sky_bottom - sky_top) * 0.3)
-        if is_day:
-            draw_l.ellipse((sun_x - sun_r, sun_y - sun_r, sun_x + sun_r, sun_y + sun_r),
-                           outline=motif_color, fill=_scene_tone(220))
-            for ang in range(0, 360, 45):
-                rad = math.radians(ang)
-                x1r = sun_x + math.cos(rad) * (sun_r + 4)
-                y1r = sun_y + math.sin(rad) * (sun_r + 4)
-                x2r = sun_x + math.cos(rad) * (sun_r + 12)
-                y2r = sun_y + math.sin(rad) * (sun_r + 12)
-                draw_l.line((x1r, y1r, x2r, y2r), fill=motif_color, width=1)
-        else:
-            draw_l.ellipse((sun_x - sun_r, sun_y - sun_r, sun_x + sun_r, sun_y + sun_r),
-                           outline=motif_color, fill=_scene_tone(230))
-            draw_l.ellipse((sun_x - int(sun_r * 0.6), sun_y - sun_r,
-                            sun_x + int(sun_r * 1.2), sun_y + sun_r),
-                           fill=_scene_tone(240), outline=_scene_tone(240))
-        if bucket == "partly":
-            cloud(x0 + int(w * 0.35), sky_top + int((sky_bottom - sky_top) * 0.45), int(w * 0.3))
-            cloud(x0 + int(w * 0.6), sky_top + int((sky_bottom - sky_top) * 0.55), int(w * 0.24))
-
-    if bucket in ("cloudy", "drizzle", "rain", "thunder", "fog"):
-        cloud(x0 + int(w * 0.35), sky_top + int((sky_bottom - sky_top) * 0.45), int(w * 0.34))
-        cloud(x0 + int(w * 0.62), sky_top + int((sky_bottom - sky_top) * 0.55), int(w * 0.3))
-
-    if bucket in ("drizzle", "rain", "thunder"):
-        rain_color = _scene_tone(140)
-        for x in range(x0 + int(w * 0.15), x1 - int(w * 0.1), int(w * 0.08)):
-            draw_l.line(
-                (x, sky_bottom - int(h * 0.05), x - int(w * 0.03), y0 + int(h * 0.7)),
-                fill=rain_color,
-                width=1,
-            )
-
-    if bucket == "fog":
-        fog_color = _scene_tone(205)
-        for idx in range(3):
-            y = sky_bottom + int(idx * h * 0.06)
-            draw_l.line((x0 + int(w * 0.05), y, x1 - int(w * 0.05), y), fill=fog_color, width=1)
-
-    if bucket == "snow":
-        snow_color = _scene_tone(180)
-        for y in range(sky_top + int(h * 0.05), sky_bottom, int(h * 0.07)):
-            for x in range(x0 + int(w * 0.1), x1 - int(w * 0.1), int(w * 0.1)):
-                draw_l.ellipse((x - 1, y - 1, x + 1, y + 1), fill=snow_color, outline=snow_color)
-
-    if bucket == "thunder":
-        bolt_color = _scene_tone(110)
-        bx = x0 + int(w * 0.55)
-        by = sky_bottom - int(h * 0.05)
-        draw_l.line(
-            (
-                bx,
-                by,
-                bx - int(w * 0.04),
-                by + int(h * 0.08),
-                bx + int(w * 0.02),
-                by + int(h * 0.08),
-                bx - int(w * 0.03),
-                by + int(h * 0.16),
-            ),
-            fill=bolt_color,
-            width=1,
-        )
-
-
-def render_scene_panel(draw_l, panel_bbox, bucket, is_day):
-    x0, y0, x1, y1 = map(int, panel_bbox)
-    h = y1 - y0
-    sky_height = int(h * 0.62)
-    sky_top = y0
-    sky_bottom = y0 + sky_height
-    sky_pal = {
-        "clear": (210, 235),
-        "partly": (200, 230),
-        "cloudy": (185, 215),
-        "rain": (170, 205),
-        "drizzle": (175, 208),
-        "fog": (190, 220),
-        "snow": (200, 230),
-        "thunder": (165, 200),
-    }
-    top_val, bottom_val = sky_pal.get(bucket, (195, 225))
-    for y in range(sky_top, sky_bottom):
-        t = (y - sky_top) / max(1, sky_height)
-        val = top_val + (bottom_val - top_val) * t
-        draw_l.line((x0, y, x1, y), fill=_scene_tone(val), width=1)
-    draw_weather_motifs(draw_l, panel_bbox, bucket, is_day)
-    draw_landscape(draw_l, panel_bbox)
-
-
 def _smooth_series(series, window=3):
     if series is None:
         return None
@@ -2474,25 +2231,16 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
                 _draw_mask_from_points(ImageDraw.Draw(mask_pv), pv_points)
             if cons_points:
                 _draw_mask_from_points(ImageDraw.Draw(mask_cons), cons_points)
-            base_fill_mask = Image.new("L", img.size, 255) if TRMNL_STYLE else img.point(lambda p: 255 if p >= 250 else 0)
+            base_fill_mask = img.point(lambda p: 255 if p >= 250 else 0)
             if cons_points:
                 cons_only = ImageChops.subtract(mask_cons, mask_pv)
-                if TRMNL_STYLE:
-                    _apply_pattern_fill(img, cons_only, base_fill_mask, cons_fill, "dot")
-                else:
-                    _fill_preserve_foreground(cons_fill, cons_only, base_fill_mask)
+                _fill_preserve_foreground(cons_fill, cons_only, base_fill_mask)
             if pv_points:
                 pv_only = ImageChops.subtract(mask_pv, mask_cons)
-                if TRMNL_STYLE:
-                    _apply_pattern_fill(img, pv_only, base_fill_mask, pv_fill, "diag")
-                else:
-                    _fill_preserve_foreground(pv_fill, pv_only, base_fill_mask)
+                _fill_preserve_foreground(pv_fill, pv_only, base_fill_mask)
             if pv_points and cons_points:
                 overlap = ImageChops.multiply(mask_pv, mask_cons)
-                if TRMNL_STYLE:
-                    _apply_pattern_fill(img, overlap, base_fill_mask, overlap_fill, "cross")
-                else:
-                    _fill_preserve_foreground(overlap_fill, overlap, base_fill_mask)
+                _fill_preserve_foreground(overlap_fill, overlap, base_fill_mask)
         step_points = _price_step_points(xs, val_list)
         if step_points:
             price_mask = Image.new("L", img.size, 0)
@@ -2536,26 +2284,11 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
     legend_y = Y0 - _s(18, scale)
     legend_x = X1 - _s(320, scale)
     cursor = legend_x
-    legend_items = (
-        ("PV", pv_fill, "diag"),
-        ("Verbrauch", cons_fill, "dot"),
-        ("PV>Verbrauch", overlap_fill, "cross"),
-    )
-    for label, shade, pattern in legend_items:
+    for label, shade in (("PV", pv_fill), ("Verbrauch", cons_fill), ("PV>Verbrauch", overlap_fill)):
         _text(d, cursor, legend_y, label, font=fonts['tiny'], fill=0)
         label_w, _ = _text_size(d, label, fonts['tiny'])
         box_x = cursor + label_w + _s(4, scale)
-        box = (box_x, legend_y + _s(2, scale), box_x + _s(12, scale), legend_y + _s(12, scale))
-        if TRMNL_STYLE:
-            tile = _pattern_tile(pattern, shade, max(0, shade - 30))
-            pattern_img = Image.new("L", (box[2] - box[0], box[3] - box[1]), shade)
-            tw, th = tile.size
-            for y in range(0, pattern_img.size[1], th):
-                for x in range(0, pattern_img.size[0], tw):
-                    pattern_img.paste(tile, (x, y))
-            img.paste(pattern_img, box)
-        else:
-            img.paste(shade, box)
+        img.paste(shade, (box_x, legend_y + _s(2, scale), box_x + _s(12, scale), legend_y + _s(12, scale)))
         cursor = box_x + _s(18, scale)
     _text(d, cursor, legend_y, "Preis", font=fonts['tiny'], fill=0)
     if not has_pv:
@@ -2820,14 +2553,6 @@ def main():
     chart_top = info_y + 28
     chart_area = (_s(margin, scale), _s(chart_top, scale), _s(w - margin, scale), _s(h - 22, scale))
 
-    if TRMNL_STYLE:
-        X0, Y0, X1, Y1 = chart_area
-        PW = (X1 - X0) / 2
-        left_bucket, left_is_day = _panel_weather_state(hourly_map, left_date)
-        right_bucket, right_is_day = _panel_weather_state(hourly_map, right_date)
-        render_scene_panel(d_hi, (X0, Y0, X0 + PW, Y1), left_bucket, left_is_day)
-        render_scene_panel(d_hi, (X0 + PW, Y0, X1, Y1), right_bucket, right_is_day)
-
     draw_two_day_chart(
         img_hi, d_hi, left, right, fonts, labels, chart_area,
         pv_left=pv_left, pv_right=pv_right,
@@ -2837,7 +2562,7 @@ def main():
     )
 
     img_lo = img_hi.resize((w, h), Image.LANCZOS)
-    final_img = finalize_to_1bit(img_lo, DITHER_METHOD) if TRMNL_STYLE else render_to_epd(img_lo)
+    final_img = render_to_epd(img_lo)
 
     epd.display(epd.getbuffer(final_img))
     epd.sleep()
