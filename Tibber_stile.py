@@ -151,6 +151,8 @@ def load_c_bitmap(path, varname):
         raise RuntimeError(f"Icon-Datei nicht lesbar: {path}: {e}")
     if varname not in content:
         raise RuntimeError(f"Array {varname} nicht gefunden in {path}")
+    content = re.sub(r"/\*.*?\*/", "", content, flags=re.S)
+    content = re.sub(r"//.*", "", content)
     bytes_list = [int(b, 16) for b in re.findall(r"0[xX][0-9A-Fa-f]{2}", content)]
     if not bytes_list:
         raise RuntimeError(f"Keine Icon-Daten gefunden in {path}")
