@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import sys, os, math, json, requests, datetime as dt, sqlite3, logging
-from PIL import Image, ImageDraw, ImageFont, ImageChops
+from PIL import Image, ImageDraw, ImageFont
 import pandas as pd, numpy as np
 from urllib.parse import urlencode
 import re
@@ -1642,71 +1642,6 @@ def _paste_dithered_polygon(img, polygon, density=0.3, seed=0):
     img.paste(pattern, (min_x, min_y), mask)
 
 
-def _paste_dotted_polygon(img, polygon, spacing=4, dot_size=1, seed=0):
-    if not polygon:
-        return
-    xs = [p[0] for p in polygon]
-    ys = [p[1] for p in polygon]
-    min_x = int(max(min(xs), 0))
-    min_y = int(max(min(ys), 0))
-    max_x = int(min(max(xs), img.width - 1))
-    max_y = int(min(max(ys), img.height - 1))
-    if max_x <= min_x or max_y <= min_y:
-        return
-    bbox_w = max_x - min_x + 1
-    bbox_h = max_y - min_y + 1
-    mask = Image.new("1", (bbox_w, bbox_h), 0)
-    mask_draw = ImageDraw.Draw(mask)
-    offset_polygon = [(x - min_x, y - min_y) for (x, y) in polygon]
-    mask_draw.polygon(offset_polygon, fill=1)
-    pattern = Image.new("1", (bbox_w, bbox_h), 1)
-    pattern_px = pattern.load()
-    spacing = max(2, int(spacing))
-    dot_size = max(1, int(dot_size))
-    for y in range(0, bbox_h, spacing):
-        row_offset = ((y // spacing) + seed) % spacing
-        for x in range(row_offset, bbox_w, spacing):
-            for dy in range(dot_size):
-                for dx in range(dot_size):
-                    px = x + dx
-                    py = y + dy
-                    if px < bbox_w and py < bbox_h:
-                        pattern_px[px, py] = 0
-    img.paste(pattern, (min_x, min_y), mask)
-
-
-def _paste_plus_watermark(img, polygon, spacing=10, size=2, seed=0):
-    if not polygon:
-        return
-    xs = [p[0] for p in polygon]
-    ys = [p[1] for p in polygon]
-    min_x = int(max(min(xs), 0))
-    min_y = int(max(min(ys), 0))
-    max_x = int(min(max(xs), img.width - 1))
-    max_y = int(min(max(ys), img.height - 1))
-    if max_x <= min_x or max_y <= min_y:
-        return
-    bbox_w = max_x - min_x + 1
-    bbox_h = max_y - min_y + 1
-    poly_mask = Image.new("1", (bbox_w, bbox_h), 0)
-    poly_draw = ImageDraw.Draw(poly_mask)
-    offset_polygon = [(x - min_x, y - min_y) for (x, y) in polygon]
-    poly_draw.polygon(offset_polygon, fill=1)
-    spacing = max(6, int(spacing))
-    size = max(1, int(size))
-    plus_mask = Image.new("1", (bbox_w, bbox_h), 0)
-    plus_draw = ImageDraw.Draw(plus_mask)
-    for y in range(0, bbox_h, spacing):
-        row_offset = ((y // spacing) + seed) % spacing
-        for x in range(row_offset, bbox_w, spacing):
-            cx = x + spacing // 2
-            cy = y + spacing // 2
-            plus_draw.line((cx - size, cy, cx + size, cy), fill=1)
-            plus_draw.line((cx, cy - size, cx, cy + size), fill=1)
-    watermark_mask = ImageChops.logical_and(poly_mask, plus_mask)
-    img.paste(1, (min_x, min_y), watermark_mask)
-
-
 def _smooth_series(series, window=3):
     if series is None:
         return None
@@ -1820,7 +1755,7 @@ def draw_weather_box(d, x, y, w, h, fonts, sun_today, sun_tomorrow=None, weather
         _draw_partly_cloudy_icon(d, icon_x, icon_y)
     title = "Wetter"
     title_w, title_h = _text_size(d, title, fonts['bold'])
-    text_x = x + 70
+    text_x = x + 60
     lines = []
     try:  t_val = float(sun_today)    if sun_today    is not None else 0.0
     except: t_val = 0.0
@@ -1862,7 +1797,7 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     d.rectangle((x, y, x + w, y + h), outline=0, width=2)
     title = "EcoFlow Stream AC"
     title_w, title_h = _text_size(d, title, fonts['bold'])
-    title_x = x + 12
+    title_x = x + int((w - title_w) / 2)
     title_y = y + 4
     d.text((title_x, title_y), title, font=fonts['bold'], fill=0)
 
@@ -2058,48 +1993,24 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
         dense.append(points[-1])
         return dense
 
-    def _fill_area(series_points, spacing, seed):
+    def _fill_area(series_points, density, seed):
         for segment in _segments_from_points(series_points):
             smooth = _densify_points(segment, steps=4)
             polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
-            _paste_dotted_polygon(img, polygon, spacing=spacing, dot_size=1, seed=seed)
+            _paste_dithered_polygon(img, polygon, density=density, seed=seed)
 
-    def _fill_consumption_area(series_points):
-        for segment in _segments_from_points(series_points):
-            smooth = _densify_points(segment, steps=4)
-            polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
-            _paste_dotted_polygon(img, polygon, spacing=3, dot_size=1, seed=5)
-            _paste_dotted_polygon(img, polygon, spacing=4, dot_size=1, seed=11)
-
-    def _fill_pv_surplus(pv_points, cons_points, seed):
-        segment_top = []
-        segment_bottom = []
+    def _fill_overlap(pv_points, cons_points, density, seed):
+        overlap = []
         for pv_pt, cons_pt in zip(pv_points, cons_points):
             if pv_pt is None or cons_pt is None:
-                if len(segment_top) > 1:
-                    top_smooth = _densify_points(segment_top, steps=3)
-                    bottom_smooth = _densify_points(segment_bottom, steps=3)
-                    polygon = top_smooth + list(reversed(bottom_smooth))
-                    _paste_plus_watermark(img, polygon, spacing=10, size=2, seed=seed)
-                segment_top = []
-                segment_bottom = []
+                overlap.append(None)
                 continue
-            if pv_pt[1] < cons_pt[1]:
-                segment_top.append(pv_pt)
-                segment_bottom.append(cons_pt)
-            else:
-                if len(segment_top) > 1:
-                    top_smooth = _densify_points(segment_top, steps=3)
-                    bottom_smooth = _densify_points(segment_bottom, steps=3)
-                    polygon = top_smooth + list(reversed(bottom_smooth))
-                    _paste_plus_watermark(img, polygon, spacing=10, size=2, seed=seed)
-                segment_top = []
-                segment_bottom = []
-        if len(segment_top) > 1:
-            top_smooth = _densify_points(segment_top, steps=3)
-            bottom_smooth = _densify_points(segment_bottom, steps=3)
-            polygon = top_smooth + list(reversed(bottom_smooth))
-            _paste_plus_watermark(img, polygon, spacing=10, size=2, seed=seed)
+            overlap_y = max(pv_pt[1], cons_pt[1])
+            overlap.append((pv_pt[0], overlap_y))
+        for segment in _segments_from_points(overlap):
+            smooth = _densify_points(segment, steps=4)
+            polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
+            _paste_dithered_polygon(img, polygon, density=density, seed=seed)
 
     def panel(ts_list, val_list, pv_sum_list, cons_list, x0):
         n = len(ts_list)
@@ -2116,12 +2027,12 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
         cons_points = None
         if has_pv and pv_sum_list is not None and n == len(pv_sum_list):
             pv_points = _series_to_points(_smooth_series(pv_sum_list), xs)
-            _fill_area(pv_points, spacing=5, seed=2)
+            _fill_area(pv_points, density=0.28, seed=2)
         if cons_list is not None and n == len(cons_list):
             cons_points = _series_to_points(_smooth_series(cons_list), xs)
-            _fill_consumption_area(cons_points)
+            _fill_area(cons_points, density=0.45, seed=5)
         if pv_points and cons_points:
-            _fill_pv_surplus(pv_points, cons_points, seed=9)
+            _fill_overlap(pv_points, cons_points, density=0.65, seed=9)
         # Min/Max Labels
         vmin_i, vmax_i = val_list.index(min(val_list)), val_list.index(max(val_list))
         for idx in (vmin_i, vmax_i):
@@ -2152,19 +2063,17 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
     legend_y = Y0 - 18
     legend_x = X1 - 320
     cursor = legend_x
-    for label, spacing, seed in (("PV", 5, 2), ("Verbrauch", 3, 5), ("PV-Überschuss", 5, 9)):
+    for label, density, seed in (("PV", 0.28, 2), ("Verbrauch", 0.45, 5), ("Überschnitt", 0.65, 9)):
         d.text((cursor, legend_y), label, font=fonts['tiny'], fill=0)
         label_w, _ = _text_size(d, label, fonts['tiny'])
         box_x = cursor + label_w + 4
-        box = [
-            (box_x, legend_y + 2), (box_x + 12, legend_y + 2),
-            (box_x + 12, legend_y + 12), (box_x, legend_y + 12)
-        ]
-        _paste_dotted_polygon(img, box, spacing=spacing, dot_size=1, seed=seed)
-        if label == "Verbrauch":
-            _paste_dotted_polygon(img, box, spacing=4, dot_size=1, seed=11)
-        if label == "PV-Überschuss":
-            _paste_plus_watermark(img, box, spacing=8, size=1, seed=seed)
+        _paste_dithered_polygon(
+            img,
+            [(box_x, legend_y + 2), (box_x + 12, legend_y + 2),
+             (box_x + 12, legend_y + 12), (box_x, legend_y + 12)],
+            density=density,
+            seed=seed,
+        )
         cursor = box_x + 18
     d.text((cursor, legend_y), "Preis", font=fonts['tiny'], fill=0)
     if not has_pv:
