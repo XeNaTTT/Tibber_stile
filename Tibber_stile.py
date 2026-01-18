@@ -1697,6 +1697,15 @@ def _text(d, x, y, text, font, fill=0):
     d.text((int(round(x)), int(round(y))), text, font=font, fill=fill)
 
 
+def _load_truetype_font(candidates, size):
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return None
+
+
 def _fmt_hours(value):
     if value is None:
         return "-"
@@ -2464,13 +2473,28 @@ def main():
     d_hi = ImageDraw.Draw(img_hi)
 
     # Fonts (hi-res)
-    try:
-        f_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", _s(18, scale))
-        f_bold  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", _s(14, scale))
-        f_body  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", _s(14, scale))
-        f_tiny  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", _s(11, scale))
-    except Exception:
-        f_title = f_bold = f_body = f_tiny = ImageFont.load_default()
+    f_title = _load_truetype_font(
+        ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "DejaVuSans-Bold.ttf"],
+        _s(18, scale),
+    )
+    f_bold = _load_truetype_font(
+        ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "DejaVuSans-Bold.ttf"],
+        _s(14, scale),
+    )
+    f_body = _load_truetype_font(
+        ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "DejaVuSans.ttf"],
+        _s(14, scale),
+    )
+    f_tiny = _load_truetype_font(
+        ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "DejaVuSans.ttf"],
+        _s(11, scale),
+    )
+    if not all([f_title, f_bold, f_body, f_tiny]):
+        logging.warning("Falling back to PIL default font; text may appear smaller without DejaVu fonts.")
+        f_title = f_title or ImageFont.load_default()
+        f_bold = f_bold or ImageFont.load_default()
+        f_body = f_body or ImageFont.load_default()
+        f_tiny = f_tiny or ImageFont.load_default()
     fonts = {'title': f_title, 'bold': f_bold, 'body': f_body, 'tiny': f_tiny}
 
     # Layout
