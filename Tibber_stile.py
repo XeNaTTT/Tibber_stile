@@ -2064,6 +2064,13 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
             _paste_dotted_polygon(img, polygon, spacing=spacing, dot_size=1, seed=seed)
 
+    def _fill_consumption_area(series_points):
+        for segment in _segments_from_points(series_points):
+            smooth = _densify_points(segment, steps=4)
+            polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
+            _paste_dotted_polygon(img, polygon, spacing=3, dot_size=1, seed=5)
+            _paste_dotted_polygon(img, polygon, spacing=4, dot_size=1, seed=11)
+
     def _fill_pv_surplus(pv_points, cons_points, seed):
         segment_top = []
         segment_bottom = []
@@ -2112,7 +2119,7 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             _fill_area(pv_points, spacing=5, seed=2)
         if cons_list is not None and n == len(cons_list):
             cons_points = _series_to_points(_smooth_series(cons_list), xs)
-            _fill_area(cons_points, spacing=3, seed=5)
+            _fill_consumption_area(cons_points)
         if pv_points and cons_points:
             _fill_pv_surplus(pv_points, cons_points, seed=9)
         # Min/Max Labels
@@ -2154,6 +2161,8 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             (box_x + 12, legend_y + 12), (box_x, legend_y + 12)
         ]
         _paste_dotted_polygon(img, box, spacing=spacing, dot_size=1, seed=seed)
+        if label == "Verbrauch":
+            _paste_dotted_polygon(img, box, spacing=4, dot_size=1, seed=11)
         if label == "PV-Überschuss":
             _paste_plus_watermark(img, box, spacing=8, size=1, seed=seed)
         cursor = box_x + 18
