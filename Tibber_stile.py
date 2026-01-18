@@ -779,17 +779,44 @@ def upsample_hourly_to_quarter(ts_15min, hourly_list):
     return pd.Series(out)
 
 # ---------- Wetter ----------
+def _pick_current_weather_code(times, codes, now=None):
+    if not times or not codes:
+        return None
+    now = now or dt.datetime.now(LOCAL_TZ)
+    best_idx = None
+    best_delta = None
+    for idx, t_str in enumerate(times):
+        try:
+            t = dt.datetime.fromisoformat(t_str)
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=LOCAL_TZ)
+        except Exception:
+            continue
+        delta = abs((t - now).total_seconds())
+        if best_delta is None or delta < best_delta:
+            best_delta = delta
+            best_idx = idx
+    if best_idx is None:
+        return None
+    try:
+        return int(codes[best_idx])
+    except Exception:
+        return None
+
+
 def sunshine_hours_both(lat, lon, model=None):
     """
-    Liefert (heute_h, morgen_h) als floats (h).
-    Nutzt Open-Meteo sunshine_duration (Sekunden -> Stunden).
+    Liefert (heute_h, morgen_h, weather_code) als floats (h) und int.
+    Nutzt Open-Meteo sunshine_duration (Sekunden -> Stunden) und weathercode.
     """
     try:
         model = model or getattr(api_key, "SUN_MODEL", "icon_seamless")
         url = (
             "https://api.open-meteo.com/v1/forecast"
             f"?latitude={lat}&longitude={lon}"
-            "&daily=sunshine_duration&timezone=Europe%2FBerlin"
+            "&daily=sunshine_duration"
+            "&hourly=weathercode"
+            "&timezone=Europe%2FBerlin"
             f"&models={model}"
         )
         r = requests.get(url, timeout=10)
@@ -809,10 +836,15 @@ def sunshine_hours_both(lat, lon, model=None):
                 return round(float(sec)/3600.0, 1)
             except Exception:
                 return 0.0
-        return _h(0), _h(1)
+        hourly = j.get("hourly", {}) or {}
+        weather_code = _pick_current_weather_code(
+            hourly.get("time") or [],
+            hourly.get("weathercode") or []
+        )
+        return _h(0), _h(1), weather_code
     except Exception as e:
         logging.error("Sunshine fetch failed: %s", e)
-        return 0.0, 0.0
+        return 0.0, 0.0, None
 
 # ---------- EcoFlow (BKW/PowerStream, signierte Requests) ----------
 import time, uuid, hmac, hashlib
@@ -1577,14 +1609,67 @@ def _as_float_or_none(x):
     except Exception:
         return None
 
-def draw_weather_box(d, x, y, w, h, fonts, sun_today, sun_tomorrow=None):
-    d.rectangle((x, y, x+w, y+h), outline=0, width=2)
-    cx, cy, r = x+25, y+25, 10
+def _weather_kind_from_code(code):
+    if code is None:
+        return "cloud"
+    try:
+        code = int(code)
+    except Exception:
+        return "cloud"
+    if code == 0:
+        return "sun"
+    if code in (1, 2, 3, 45, 48):
+        return "cloud"
+    if code in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99):
+        return "rain"
+    if code in (71, 73, 75, 77, 85, 86):
+        return "snow"
+    return "cloud"
+
+
+def _draw_sun_icon(d, cx, cy, r):
     d.ellipse((cx-r, cy-r, cx+r, cy+r), outline=0, width=2)
     for ang in range(0, 360, 45):
         rad = math.radians(ang)
         d.line((cx+math.cos(rad)*r*1.6, cy+math.sin(rad)*r*1.6,
                 cx+math.cos(rad)*r*2.4, cy+math.sin(rad)*r*2.4), fill=0, width=2)
+
+
+def _draw_cloud_icon(d, x, y):
+    base_y = y + 26
+    d.ellipse((x+4, base_y-12, x+4+16, base_y+4), outline=0, width=2)
+    d.ellipse((x+14, base_y-16, x+14+20, base_y+4), outline=0, width=2)
+    d.ellipse((x+26, base_y-12, x+26+16, base_y+4), outline=0, width=2)
+    d.line((x+6, base_y+4, x+42, base_y+4), fill=0, width=2)
+
+
+def _draw_rain_icon(d, x, y):
+    _draw_cloud_icon(d, x, y)
+    drop_y = y + 34
+    for offset in (10, 20, 30):
+        d.line((x+offset, drop_y, x+offset-2, drop_y+8), fill=0, width=2)
+
+
+def _draw_snow_icon(d, x, y):
+    _draw_cloud_icon(d, x, y)
+    flake_y = y + 36
+    for offset in (12, 22, 32):
+        d.line((x+offset-2, flake_y-2, x+offset+2, flake_y+2), fill=0, width=2)
+        d.line((x+offset-2, flake_y+2, x+offset+2, flake_y-2), fill=0, width=2)
+
+
+def draw_weather_box(d, x, y, w, h, fonts, sun_today, sun_tomorrow=None, weather_code=None):
+    d.rectangle((x, y, x+w, y+h), outline=0, width=2)
+    icon_x, icon_y = x + 8, y + 4
+    kind = _weather_kind_from_code(weather_code)
+    if kind == "sun":
+        _draw_sun_icon(d, icon_x + 17, icon_y + 17, 10)
+    elif kind == "rain":
+        _draw_rain_icon(d, icon_x, icon_y)
+    elif kind == "snow":
+        _draw_snow_icon(d, icon_x, icon_y)
+    else:
+        _draw_cloud_icon(d, icon_x, icon_y)
     d.text((x+60, y+5), "Wetter", font=fonts['bold'], fill=0)
     try:  t_val = float(sun_today)    if sun_today    is not None else 0.0
     except: t_val = 0.0
@@ -2008,13 +2093,13 @@ def main():
     cons_left = upsample_hourly_to_quarter(tl_dt, hourly)
     cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
-    sun_today, sun_tomorrow = sunshine_hours_both(api_key.LAT, api_key.LON)
+    sun_today, sun_tomorrow, weather_code = sunshine_hours_both(api_key.LAT, api_key.LON)
     global SUN_TODAY, SUN_TOMORROW
     SUN_TODAY = sun_today
     SUN_TOMORROW = sun_tomorrow
     logging.info(
-        "Wetterdaten via Open-Meteo (lat=%.4f, lon=%.4f): heute=%.1f h, morgen=%.1f h",
-        api_key.LAT, api_key.LON, sun_today, sun_tomorrow
+        "Wetterdaten via Open-Meteo (lat=%.4f, lon=%.4f): heute=%.1f h, morgen=%.1f h, code=%s",
+        api_key.LAT, api_key.LON, sun_today, sun_tomorrow, weather_code
     )
 
     pv_left = get_pv_series_db(tl_dt)
@@ -2045,7 +2130,7 @@ def main():
     margin = 10
     top_h  = 70
     box_w  = (w - margin*3)//2
-    draw_weather_box(d, margin, margin, box_w, top_h, fonts, sun_today, sun_tomorrow)
+    draw_weather_box(d, margin, margin, box_w, top_h, fonts, sun_today, sun_tomorrow, weather_code)
     draw_ecoflow_box(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
 
     # Info-Zeile tiefer
