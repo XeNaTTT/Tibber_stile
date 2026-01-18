@@ -1609,6 +1609,47 @@ def _as_float_or_none(x):
     except Exception:
         return None
 
+def _text_size(d, text, font):
+    bbox = d.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+def _paste_dithered_polygon(img, polygon, density=0.3, seed=0):
+    if not polygon:
+        return
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    min_x = int(max(min(xs), 0))
+    min_y = int(max(min(ys), 0))
+    max_x = int(min(max(xs), img.width - 1))
+    max_y = int(min(max(ys), img.height - 1))
+    if max_x <= min_x or max_y <= min_y:
+        return
+    bbox_w = max_x - min_x + 1
+    bbox_h = max_y - min_y + 1
+    mask = Image.new("1", (bbox_w, bbox_h), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    offset_polygon = [(x - min_x, y - min_y) for (x, y) in polygon]
+    mask_draw.polygon(offset_polygon, fill=1)
+    pattern = Image.new("1", (bbox_w, bbox_h), 1)
+    pattern_px = pattern.load()
+    step = 6
+    threshold = max(1, min(step - 1, int(round(density * step))))
+    for y in range(bbox_h):
+        for x in range(bbox_w):
+            if ((x + y + seed) % step) < threshold:
+                pattern_px[x, y] = 0
+    img.paste(pattern, (min_x, min_y), mask)
+
+
+def _smooth_series(series, window=3):
+    if series is None:
+        return None
+    try:
+        return series.rolling(window=window, center=True, min_periods=1).mean()
+    except Exception:
+        return series
+
 def _weather_kind_from_code(code):
     if code is None:
         return "cloud"
@@ -1658,26 +1699,79 @@ def _draw_snow_icon(d, x, y):
         d.line((x+offset-2, flake_y+2, x+offset+2, flake_y-2), fill=0, width=2)
 
 
+def _draw_sun_icon_v2(d, cx, cy, r):
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=0, width=3)
+    for ang in range(0, 360, 45):
+        rad = math.radians(ang)
+        x1 = cx + math.cos(rad) * (r + 4)
+        y1 = cy + math.sin(rad) * (r + 4)
+        x2 = cx + math.cos(rad) * (r + 10)
+        y2 = cy + math.sin(rad) * (r + 10)
+        d.line((x1, y1, x2, y2), fill=0, width=3)
+
+
+def _draw_cloud_icon_v2(d, x, y):
+    cloud_w = 52
+    cloud_h = 26
+    base_y = y + cloud_h
+    d.arc((x, y + 10, x + 22, y + 32), start=180, end=360, fill=0, width=3)
+    d.arc((x + 12, y, x + 40, y + 28), start=180, end=360, fill=0, width=3)
+    d.arc((x + 28, y + 10, x + 52, y + 32), start=180, end=360, fill=0, width=3)
+    d.line((x + 6, base_y, x + cloud_w - 6, base_y), fill=0, width=3)
+
+
+def _draw_partly_cloudy_icon(d, x, y):
+    _draw_sun_icon_v2(d, x + 12, y + 12, 7)
+    _draw_cloud_icon_v2(d, x + 8, y + 6)
+
+
+def _draw_rain_icon_v2(d, x, y):
+    _draw_cloud_icon_v2(d, x, y)
+    drop_y = y + 32
+    for offset in (14, 26, 38):
+        d.line((x + offset, drop_y, x + offset - 3, drop_y + 8), fill=0, width=3)
+
+
+def _draw_snow_icon_v2(d, x, y):
+    _draw_cloud_icon_v2(d, x, y)
+    flake_y = y + 34
+    for offset in (16, 28, 40):
+        d.line((x + offset - 3, flake_y - 3, x + offset + 3, flake_y + 3), fill=0, width=2)
+        d.line((x + offset - 3, flake_y + 3, x + offset + 3, flake_y - 3), fill=0, width=2)
+
+
 def draw_weather_box(d, x, y, w, h, fonts, sun_today, sun_tomorrow=None, weather_code=None):
     d.rectangle((x, y, x+w, y+h), outline=0, width=2)
-    icon_x, icon_y = x + 8, y + 4
+    icon_x = x + 10
+    icon_y = y + int((h - 42) / 2)
     kind = _weather_kind_from_code(weather_code)
     if kind == "sun":
-        _draw_sun_icon(d, icon_x + 17, icon_y + 17, 10)
+        _draw_sun_icon_v2(d, icon_x + 20, icon_y + 20, 10)
     elif kind == "rain":
-        _draw_rain_icon(d, icon_x, icon_y)
+        _draw_rain_icon_v2(d, icon_x, icon_y)
     elif kind == "snow":
-        _draw_snow_icon(d, icon_x, icon_y)
+        _draw_snow_icon_v2(d, icon_x, icon_y)
     else:
-        _draw_cloud_icon(d, icon_x, icon_y)
-    d.text((x+60, y+5), "Wetter", font=fonts['bold'], fill=0)
+        _draw_partly_cloudy_icon(d, icon_x, icon_y)
+    title = "Wetter"
+    title_w, title_h = _text_size(d, title, fonts['bold'])
+    text_x = x + 60
+    lines = []
     try:  t_val = float(sun_today)    if sun_today    is not None else 0.0
     except: t_val = 0.0
     try:  m_val = float(sun_tomorrow) if sun_tomorrow is not None else None
     except: m_val = None
-    d.text((x+60, y+28), f"Sonnenstunden heute:  {t_val:.1f} h", font=fonts['small'], fill=0)
+    lines.append(f"Sonnenstunden heute: {t_val:.1f} h")
     if m_val is not None:
-        d.text((x+60, y+46), f"Sonnenstunden morgen: {m_val:.1f} h", font=fonts['small'], fill=0)
+        lines.append(f"Sonnenstunden morgen: {m_val:.1f} h")
+    line_heights = [title_h] + [_text_size(d, line, fonts['small'])[1] for line in lines]
+    total_h = sum(line_heights) + 6
+    start_y = y + max(6, int((h - total_h) / 2))
+    d.text((text_x, start_y), title, font=fonts['bold'], fill=0)
+    line_y = start_y + title_h + 4
+    for line in lines:
+        d.text((text_x, line_y), line, font=fonts['small'], fill=0)
+        line_y += _text_size(d, line, fonts['small'])[1] + 2
 
 def minutes_to_hhmm(m):
     if m is None:
@@ -1702,11 +1796,14 @@ def draw_battery(d, x, y, w, h, soc, arrow=None, fonts=None):
 def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     d.rectangle((x, y, x + w, y + h), outline=0, width=2)
     title = "EcoFlow Stream AC"
-    title_x, title_y = x + 10, y + 5
+    title_w, title_h = _text_size(d, title, fonts['bold'])
+    title_x = x + int((w - title_w) / 2)
+    title_y = y + 4
     d.text((title_x, title_y), title, font=fonts['bold'], fill=0)
 
     # Batterie
-    batt_x, batt_y = x + 10, y + 28
+    batt_x = x + 12
+    batt_y = y + int((h - 28) / 2)
     draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=None, fonts=fonts)
 
     # Hilfsfunktion
@@ -1716,8 +1813,6 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
         except Exception:
             return "-"
 
-    text_offset = 10
-
     # Klarere Zuordnung: Batterie-/Systemleistung, PV-Eingang, Netz, Haushaltslast
     power_w = st.get('power_w') or st.get('gridConnectionPower')
     pv_w    = st.get('pv_input_w_sum')
@@ -1725,11 +1820,10 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     load_w  = st.get('load_w') or st.get('powGetSysLoad')
 
     # Rechenweg: Leistung + PV-Ertrag + Netz = Last
-    base_x = x + w - 160  # etwas weiter nach links geschoben
+    base_x = x + w - 175  # etwas weiter nach links geschoben
     op_x   = base_x
     lbl_x  = base_x + 12
     val_x  = base_x + 105
-    base_y = y + 6
     row_height = 14
 
     entries = [
@@ -1737,6 +1831,8 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
         ("+", "PV-Ertrag", pv_w),           # Aktuelle PV-Einspeisung
         ("+", "Netz", grid_w)               # Bezug (+) / Einspeisung (-)
     ]
+    block_h = len(entries) * row_height + 14
+    base_y = y + max(4, int((h - block_h) / 2))
 
     for i, (op, label, value) in enumerate(entries):
         y_row = base_y + i * row_height
@@ -1771,9 +1867,14 @@ def draw_info_box(d, info, fonts, y, width):
     ]
     colw = width/len(items)
     for i,(k,v) in enumerate(items):
-        d.text((x0 + i*colw, y), f"{k}: {v}", font=fonts['bold'], fill=0)
+        label = f"{k}: {v}"
+        label_w, label_h = _text_size(d, label, fonts['bold'])
+        col_x = x0 + i * colw
+        tx = col_x + (colw - label_w) / 2
+        ty = y - label_h / 2
+        d.text((tx, ty), label, font=fonts['bold'], fill=0)
 
-def draw_two_day_chart(d, left, right, fonts, subtitles, area,
+def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
                        pv_left=None, pv_right=None,
                        cons_left=None, cons_right=None,
                        cur_dt=None, cur_price=None):
@@ -1805,20 +1906,12 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
         except: return 0
     pv_left = pv_left or {}
     pv_right = pv_right or {}
-    pv1_left = pv_left.get("pv1")
-    pv2_left = pv_left.get("pv2")
     pv_sum_left = pv_left.get("pv_sum")
-    pv1_right = pv_right.get("pv1")
-    pv2_right = pv_right.get("pv2")
     pv_sum_right = pv_right.get("pv_sum")
 
     pv_max = max(
         vmax_power(pv_sum_left),
-        vmax_power(pv1_left),
-        vmax_power(pv2_left),
         vmax_power(pv_sum_right),
-        vmax_power(pv1_right),
-        vmax_power(pv2_right),
     )
     cons_max = max(vmax_power(cons_left), vmax_power(cons_right))
     power_scale_max = max(pv_max, cons_max)
@@ -1833,10 +1926,7 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
         except Exception:
             return False
 
-    has_pv = any(
-        _series_has_values(s)
-        for s in (pv_sum_left, pv_sum_right, pv1_left, pv2_left, pv1_right, pv2_right)
-    )
+    has_pv = any(_series_has_values(s) for s in (pv_sum_left, pv_sum_right))
 
     # Preis-Y-Ticks (nur innerhalb)
     step = 5
@@ -1847,77 +1937,111 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
             d.text((X0-45, yy-7), f"{yv/100:.2f}", font=fonts['tiny'], fill=0)
         yv += step
 
-    def panel(ts_list, val_list, pv1_list, pv2_list, pv_sum_list, cons_list, x0):
+    def _draw_price_shadow(xs, val_list):
+        shadow_h = 40
+        for i in range(len(xs) - 1):
+            x_start = int(xs[i])
+            x_end = int(xs[i + 1])
+            y_base = int(_price_to_y(val_list[i]))
+            for offset in range(1, shadow_h + 1):
+                y = y_base + offset
+                if y >= Y1:
+                    break
+                density = max(0.0, (shadow_h - offset) / shadow_h)
+                step = 6
+                threshold = max(1, int(round(density * step)))
+                if threshold <= 0:
+                    continue
+                for x in range(x_start, x_end + 1, 2):
+                    if ((x + offset) % step) < threshold:
+                        d.point((x, y), fill=0)
+
+    def _series_to_points(series, xs):
+        points = []
+        for i, x in enumerate(xs):
+            if pd.isna(series.iloc[i]):
+                points.append(None)
+                continue
+            val = max(0.0, min(float(series.iloc[i]), 600.0))
+            y = Y1 - val * sy_power
+            points.append((x, y))
+        return points
+
+    def _segments_from_points(points):
+        segment = []
+        for pt in points:
+            if pt is None:
+                if len(segment) > 1:
+                    yield segment
+                segment = []
+                continue
+            segment.append(pt)
+        if len(segment) > 1:
+            yield segment
+
+    def _densify_points(points, steps=3):
+        if len(points) < 2:
+            return points
+        dense = []
+        for i in range(len(points) - 1):
+            x1, y1 = points[i]
+            x2, y2 = points[i + 1]
+            dense.append((x1, y1))
+            for s in range(1, steps + 1):
+                t = s / (steps + 1)
+                dense.append((x1 + (x2 - x1) * t, y1 + (y2 - y1) * t))
+        dense.append(points[-1])
+        return dense
+
+    def _fill_area(series_points, density, seed):
+        for segment in _segments_from_points(series_points):
+            smooth = _densify_points(segment, steps=4)
+            polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
+            _paste_dithered_polygon(img, polygon, density=density, seed=seed)
+
+    def _fill_overlap(pv_points, cons_points, density, seed):
+        overlap = []
+        for pv_pt, cons_pt in zip(pv_points, cons_points):
+            if pv_pt is None or cons_pt is None:
+                overlap.append(None)
+                continue
+            overlap_y = max(pv_pt[1], cons_pt[1])
+            overlap.append((pv_pt[0], overlap_y))
+        for segment in _segments_from_points(overlap):
+            smooth = _densify_points(segment, steps=4)
+            polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
+            _paste_dithered_polygon(img, polygon, density=density, seed=seed)
+
+    def panel(ts_list, val_list, pv_sum_list, cons_list, x0):
         n = len(ts_list)
         if n < 2: return
         xs = [x0 + i*(PW/(n-1)) for i in range(n)]
+        _draw_price_shadow(xs, val_list)
         # Preis Stufenlinie
         for i in range(n-1):
             x1, y1 = xs[i],   _price_to_y(val_list[i])
             x2, y2 = xs[i+1], _price_to_y(val_list[i+1])
             d.line((x1,y1, x2,y1), fill=0, width=2)
             d.line((x2,y1, x2,y2), fill=0, width=2)
-        # PV1 (thin)
-        if has_pv and pv1_list is not None and n == len(pv1_list):
-            last_pt = None
-            for i in range(n):
-                if pd.isna(pv1_list.iloc[i]):
-                    last_pt = None
-                    continue
-                x = xs[i]
-                val = max(0.0, min(float(pv1_list.iloc[i]), 600.0))
-                y = Y1 - val*sy_power
-                if last_pt is not None:
-                    d.line((last_pt[0], last_pt[1], x, y), fill=0, width=1)
-                last_pt = (x, y)
-        # PV2 (thin)
-        if has_pv and pv2_list is not None and n == len(pv2_list):
-            last_pt = None
-            for i in range(n):
-                if pd.isna(pv2_list.iloc[i]):
-                    last_pt = None
-                    continue
-                x = xs[i]
-                val = max(0.0, min(float(pv2_list.iloc[i]), 600.0))
-                y = Y1 - val*sy_power
-                if last_pt is not None:
-                    d.line((last_pt[0], last_pt[1], x, y), fill=0, width=1)
-                last_pt = (x, y)
-        # PV-Summe (solid, dicker)
+        pv_points = None
+        cons_points = None
         if has_pv and pv_sum_list is not None and n == len(pv_sum_list):
-            last_pt = None
-            for i in range(n):
-                if pd.isna(pv_sum_list.iloc[i]):
-                    last_pt = None
-                    continue
-                x = xs[i]
-                val = max(0.0, min(float(pv_sum_list.iloc[i]), 600.0))
-                y = Y1 - val*sy_power
-                if last_pt is not None:
-                    d.line((last_pt[0], last_pt[1], x, y), fill=0, width=2)
-                last_pt = (x, y)
-        # Verbrauch
+            pv_points = _series_to_points(_smooth_series(pv_sum_list), xs)
+            _fill_area(pv_points, density=0.28, seed=2)
         if cons_list is not None and n == len(cons_list):
-            last_pt = None
-            for i in range(n):
-                if pd.isna(cons_list.iloc[i]):
-                    last_pt = None
-                    continue
-                x = xs[i]
-                val = max(0.0, min(float(cons_list.iloc[i]), 600.0))
-                y = Y1 - val*sy_power
-                if last_pt is not None:
-                    draw_dashed_line(d, last_pt[0], last_pt[1], x, y, dash=4, gap=3, width=1)
-                last_pt = (x, y)
+            cons_points = _series_to_points(_smooth_series(cons_list), xs)
+            _fill_area(cons_points, density=0.45, seed=5)
+        if pv_points and cons_points:
+            _fill_overlap(pv_points, cons_points, density=0.65, seed=9)
         # Min/Max Labels
         vmin_i, vmax_i = val_list.index(min(val_list)), val_list.index(max(val_list))
         for idx in (vmin_i, vmax_i):
             xi, yi = xs[idx], _price_to_y(val_list[idx])
             d.text((xi-12, yi-12), f"{val_list[idx]/100:.2f}", font=fonts['tiny'], fill=0)
 
-    panel(tl, vl, pv1_left, pv2_left, pv_sum_left, cons_left, X0)
+    panel(tl, vl, pv_sum_left, cons_left, X0)
     d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
-    panel(tr, vr, pv1_right, pv2_right, pv_sum_right, cons_right, X0+PW)
+    panel(tr, vr, pv_sum_right, cons_right, X0+PW)
 
     # Subtitles unter Achse
     d.text((X0+5,    Y1+28), subtitles[0], font=fonts['bold'], fill=0)
@@ -1936,7 +2060,22 @@ def draw_two_day_chart(d, left, right, fonts, subtitles, area,
     hour_ticks(tr, X0+PW)
 
     # Legende Leistung
-    d.text((X1-300, Y0-16), "PV Summe — PV1 — PV2 - - Verbrauch   Strompreis", font=fonts['tiny'], fill=0)
+    legend_y = Y0 - 18
+    legend_x = X1 - 320
+    cursor = legend_x
+    for label, density, seed in (("PV", 0.28, 2), ("Verbrauch", 0.45, 5), ("Überschnitt", 0.65, 9)):
+        d.text((cursor, legend_y), label, font=fonts['tiny'], fill=0)
+        label_w, _ = _text_size(d, label, fonts['tiny'])
+        box_x = cursor + label_w + 4
+        _paste_dithered_polygon(
+            img,
+            [(box_x, legend_y + 2), (box_x + 12, legend_y + 2),
+             (box_x + 12, legend_y + 12), (box_x, legend_y + 12)],
+            density=density,
+            seed=seed,
+        )
+        cursor = box_x + 18
+    d.text((cursor, legend_y), "Preis", font=fonts['tiny'], fill=0)
     if not has_pv:
         d.text((X0 + 6, Y0 + 6), "PV DB leer - keine PV-Linien", font=fonts['tiny'], fill=0)
 
@@ -2133,15 +2272,15 @@ def main():
     draw_weather_box(d, margin, margin, box_w, top_h, fonts, sun_today, sun_tomorrow, weather_code)
     draw_ecoflow_box(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
 
-    # Info-Zeile tiefer
-    draw_info_box(d, info, fonts, y=top_h + margin + 6, width=w-20)
+    # Info-Zeile tiefer und zentriert
+    draw_info_box(d, info, fonts, y=top_h + margin + 18, width=w-20)
 
     # Chart kleiner in der HÃ¶he + Platz fÃ¼r Stunden
-    chart_top = top_h + margin + 40
-    chart_area = (int(w*0.06), chart_top, w - int(w*0.06), h-70)
+    chart_top = top_h + margin + 48
+    chart_area = (margin, chart_top, w - margin, h-70)
 
     draw_two_day_chart(
-        d, left, right, fonts, labels, chart_area,
+        img, d, left, right, fonts, labels, chart_area,
         pv_left=pv_left, pv_right=pv_right,
         cons_left=cons_left, cons_right=cons_right,
         cur_dt=info['current_dt'], cur_price=info['current_price']
