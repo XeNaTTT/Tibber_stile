@@ -812,6 +812,32 @@ def fetch_openmeteo_hourly(lat, lon):
         logging.error("Open-Meteo hourly fetch failed: %s", e)
         return {}
 
+def fetch_openmeteo_sunshine_hours(lat, lon):
+    """
+    Holt Open-Meteo daily sunshine_duration (Sekunden) für heute und morgen.
+    Return: (sun_today_h, sun_tomorrow_h) in Stunden oder (None, None)
+    """
+    try:
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            "&daily=sunshine_duration"
+            "&timezone=Europe%2FBerlin"
+        )
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        j = r.json()
+        daily = j.get("daily", {}) or {}
+        arr = daily.get("sunshine_duration") or []
+        if len(arr) < 2:
+            raise ValueError("sunshine_duration missing or incomplete")
+        sun_today_h = float(arr[0]) / 3600.0
+        sun_tomorrow_h = float(arr[1]) / 3600.0
+        return sun_today_h, sun_tomorrow_h
+    except Exception as e:
+        logging.error("Open-Meteo sunshine fetch failed: %s", e)
+        return None, None
+
 # ---------- EcoFlow (BKW/PowerStream, signierte Requests) ----------
 import time, uuid, hmac, hashlib
 from urllib.parse import urlencode
@@ -1580,6 +1606,15 @@ def _text_size(d, text, font):
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
+def _fmt_hours(value):
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):.1f}"
+    except Exception:
+        return "-"
+
+
 _BAYER_8X8 = [
     [0, 32, 8, 40, 2, 34, 10, 42],
     [48, 16, 56, 24, 50, 18, 58, 26],
@@ -1778,7 +1813,7 @@ def draw_weather_icon(draw, x, y, size, code, is_day, fill=0):
         draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
 
 
-def draw_weather_box(d, x, y, w, h, fonts, hourly_map):
+def draw_weather_box(d, x, y, w, h, fonts, hourly_map, sun_today_h=None, sun_tomorrow_h=None):
     d.rectangle((x, y, x + w, y + h), outline=0, width=2)
     icon_size = 40
     icon_x = x + 10
@@ -1808,6 +1843,8 @@ def draw_weather_box(d, x, y, w, h, fonts, hourly_map):
     tomorrow_noon = dt.datetime(tomorrow.year, tomorrow.month, tomorrow.day, 12, tzinfo=LOCAL_TZ)
     lines.append(f"Heute: {bucket_for(today_noon)}")
     lines.append(f"Morgen: {bucket_for(tomorrow_noon)}")
+    lines.append(f"Sonne heute: {_fmt_hours(sun_today_h)} h")
+    lines.append(f"Sonne morgen: {_fmt_hours(sun_tomorrow_h)} h")
 
     line_heights = [title_h] + [_text_size(d, line, fonts['small'])[1] for line in lines]
     total_h = sum(line_heights) + 6
@@ -2277,10 +2314,20 @@ def main():
     cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
     hourly_map = fetch_openmeteo_hourly(api_key.LAT, api_key.LON)
+    sun_today_h, sun_tomorrow_h = fetch_openmeteo_sunshine_hours(api_key.LAT, api_key.LON)
     logging.info(
         "Wetterdaten via Open-Meteo (lat=%.4f, lon=%.4f): hourly entries=%d",
         api_key.LAT, api_key.LON, len(hourly_map)
     )
+    if sun_today_h is not None or sun_tomorrow_h is not None:
+        logging.info(
+            "Sonnenstunden: heute=%s h, morgen=%s h",
+            _fmt_hours(sun_today_h),
+            _fmt_hours(sun_tomorrow_h),
+        )
+    global SUN_TODAY, SUN_TOMORROW
+    SUN_TODAY = sun_today_h
+    SUN_TOMORROW = sun_tomorrow_h
 
     pv_left = get_pv_series_db(tl_dt)
     if labels[1] == "Morgen":
@@ -2310,7 +2357,17 @@ def main():
     margin = 10
     top_h  = 70
     box_w  = (w - margin*3)//2
-    draw_weather_box(d, margin, margin, box_w, top_h, fonts, hourly_map)
+    draw_weather_box(
+        d,
+        margin,
+        margin,
+        box_w,
+        top_h,
+        fonts,
+        hourly_map,
+        sun_today_h=sun_today_h,
+        sun_tomorrow_h=sun_tomorrow_h,
+    )
     draw_ecoflow_box(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
 
     # Info-Zeile tiefer und zentriert
