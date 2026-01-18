@@ -1820,7 +1820,7 @@ def draw_weather_box(d, x, y, w, h, fonts, sun_today, sun_tomorrow=None, weather
         _draw_partly_cloudy_icon(d, icon_x, icon_y)
     title = "Wetter"
     title_w, title_h = _text_size(d, title, fonts['bold'])
-    text_x = x + 60
+    text_x = x + 70
     lines = []
     try:  t_val = float(sun_today)    if sun_today    is not None else 0.0
     except: t_val = 0.0
@@ -1862,7 +1862,7 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     d.rectangle((x, y, x + w, y + h), outline=0, width=2)
     title = "EcoFlow Stream AC"
     title_w, title_h = _text_size(d, title, fonts['bold'])
-    title_x = x + int((w - title_w) / 2)
+    title_x = x + 12
     title_y = y + 4
     d.text((title_x, title_y), title, font=fonts['bold'], fill=0)
 
