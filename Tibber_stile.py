@@ -2203,6 +2203,12 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
             mask_draw.polygon(polygon, fill=255)
 
+    def _fill_preserve_foreground(shade, mask, base_mask):
+        if mask is None:
+            return
+        safe_mask = ImageChops.multiply(mask, base_mask)
+        img.paste(shade, (0, 0), safe_mask)
+
     price_fill = 232
     pv_fill = 205
     cons_fill = 165
@@ -2225,15 +2231,16 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
                 _draw_mask_from_points(ImageDraw.Draw(mask_pv), pv_points)
             if cons_points:
                 _draw_mask_from_points(ImageDraw.Draw(mask_cons), cons_points)
+            base_fill_mask = img.point(lambda p: 255 if p >= 250 else 0)
             if cons_points:
                 cons_only = ImageChops.subtract(mask_cons, mask_pv)
-                img.paste(cons_fill, (0, 0), cons_only)
+                _fill_preserve_foreground(cons_fill, cons_only, base_fill_mask)
             if pv_points:
                 pv_only = ImageChops.subtract(mask_pv, mask_cons)
-                img.paste(pv_fill, (0, 0), pv_only)
+                _fill_preserve_foreground(pv_fill, pv_only, base_fill_mask)
             if pv_points and cons_points:
                 overlap = ImageChops.multiply(mask_pv, mask_cons)
-                img.paste(overlap_fill, (0, 0), overlap)
+                _fill_preserve_foreground(overlap_fill, overlap, base_fill_mask)
         step_points = _price_step_points(xs, val_list)
         if step_points:
             price_mask = Image.new("L", img.size, 0)
