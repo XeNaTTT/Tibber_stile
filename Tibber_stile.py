@@ -2189,8 +2189,8 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             mask_draw.polygon(polygon, fill=1)
 
     dark_pattern = _tile_pattern(_make_bayer_tile(0.9), img.size)
-    pv_fill_gray = 130
-    pv_dither_strength = 0.5
+    pv_fill_gray = 200
+    pv_dither_strength = 0.3
 
     def panel(ts_list, val_list, pv_sum_list, cons_list, x0):
         n = len(ts_list)
@@ -2202,16 +2202,6 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             pv_points = _series_to_points(_smooth_series(pv_sum_list), xs)
         if cons_list is not None and n == len(cons_list):
             cons_points = _series_to_points(_smooth_series(cons_list), xs)
-        if pv_points:
-            pv_layer = Image.new("L", img.size, 255)
-            pv_draw = ImageDraw.Draw(pv_layer)
-            for segment in _segments_from_points(pv_points):
-                smooth = _densify_points(segment, steps=4)
-                polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
-                pv_draw.polygon(polygon, fill=pv_fill_gray)
-            pv_mask = pv_layer.point(lambda p: 255 if p < 255 else 0)
-            pv_dither = _ordered_dither_bayer(pv_layer, matrix=_BAYER_8X8, strength=pv_dither_strength)
-            img.paste(pv_dither, (0, 0), pv_mask)
         if pv_points or cons_points:
             mask_pv = Image.new("1", img.size, 0)
             mask_cons = Image.new("1", img.size, 0)
@@ -2224,6 +2214,16 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             if pv_points and cons_points:
                 pv_only = ImageChops.logical_and(mask_pv, ImageChops.invert(mask_cons))
                 img.paste(dark_pattern, (0, 0), pv_only)
+        if pv_points:
+            pv_layer = Image.new("L", img.size, 255)
+            pv_draw = ImageDraw.Draw(pv_layer)
+            for segment in _segments_from_points(pv_points):
+                smooth = _densify_points(segment, steps=4)
+                polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
+                pv_draw.polygon(polygon, fill=pv_fill_gray)
+            pv_mask = pv_layer.point(lambda p: 255 if p < 255 else 0)
+            pv_dither = _ordered_dither_bayer(pv_layer, matrix=_BAYER_8X8, strength=pv_dither_strength)
+            img.paste(pv_dither, (0, 0), pv_mask)
         _draw_price_shadow(xs, val_list)
         # Preis Stufenlinie
         for i in range(n-1):
