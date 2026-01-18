@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import sys, os, math, json, requests, datetime as dt, sqlite3, logging
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageChops
 import pandas as pd, numpy as np
 from urllib.parse import urlencode
 import re
@@ -1580,7 +1580,40 @@ def _text_size(d, text, font):
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
-def _paste_dithered_polygon(img, polygon, density=0.3, seed=0):
+_BAYER_8X8 = [
+    [0, 32, 8, 40, 2, 34, 10, 42],
+    [48, 16, 56, 24, 50, 18, 58, 26],
+    [12, 44, 4, 36, 14, 46, 6, 38],
+    [60, 28, 52, 20, 62, 30, 54, 22],
+    [3, 35, 11, 43, 1, 33, 9, 41],
+    [51, 19, 59, 27, 49, 17, 57, 25],
+    [15, 47, 7, 39, 13, 45, 5, 37],
+    [63, 31, 55, 23, 61, 29, 53, 21],
+]
+
+
+def _make_bayer_tile(density, size=8):
+    density = max(0.0, min(1.0, float(density)))
+    threshold = density * (size * size)
+    tile = Image.new("1", (size, size), 1)
+    px = tile.load()
+    for y in range(size):
+        for x in range(size):
+            if _BAYER_8X8[y][x] < threshold:
+                px[x, y] = 0
+    return tile
+
+
+def _tile_pattern(tile, size):
+    pattern = Image.new("1", size, 1)
+    tw, th = tile.size
+    for y in range(0, size[1], th):
+        for x in range(0, size[0], tw):
+            pattern.paste(tile, (x, y))
+    return pattern
+
+
+def _paste_dithered_polygon(img, polygon, density=0.3):
     if not polygon:
         return
     xs = [p[0] for p in polygon]
@@ -1597,14 +1630,8 @@ def _paste_dithered_polygon(img, polygon, density=0.3, seed=0):
     mask_draw = ImageDraw.Draw(mask)
     offset_polygon = [(x - min_x, y - min_y) for (x, y) in polygon]
     mask_draw.polygon(offset_polygon, fill=1)
-    pattern = Image.new("1", (bbox_w, bbox_h), 1)
-    pattern_px = pattern.load()
-    step = 6
-    threshold = max(1, min(step - 1, int(round(density * step))))
-    for y in range(bbox_h):
-        for x in range(bbox_w):
-            if ((x + y + seed) % step) < threshold:
-                pattern_px[x, y] = 0
+    tile = _make_bayer_tile(density)
+    pattern = _tile_pattern(tile, (bbox_w, bbox_h))
     img.paste(pattern, (min_x, min_y), mask)
 
 
@@ -2011,24 +2038,14 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
         dense.append(points[-1])
         return dense
 
-    def _fill_area(series_points, density, seed):
+    def _draw_mask_from_points(mask_draw, series_points):
         for segment in _segments_from_points(series_points):
             smooth = _densify_points(segment, steps=4)
             polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
-            _paste_dithered_polygon(img, polygon, density=density, seed=seed)
+            mask_draw.polygon(polygon, fill=1)
 
-    def _fill_overlap(pv_points, cons_points, density, seed):
-        overlap = []
-        for pv_pt, cons_pt in zip(pv_points, cons_points):
-            if pv_pt is None or cons_pt is None:
-                overlap.append(None)
-                continue
-            overlap_y = max(pv_pt[1], cons_pt[1])
-            overlap.append((pv_pt[0], overlap_y))
-        for segment in _segments_from_points(overlap):
-            smooth = _densify_points(segment, steps=4)
-            polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
-            _paste_dithered_polygon(img, polygon, density=density, seed=seed)
+    dark_pattern = _tile_pattern(_make_bayer_tile(0.9), img.size)
+    light_pattern = _tile_pattern(_make_bayer_tile(0.6), img.size)
 
     def panel(ts_list, val_list, pv_sum_list, cons_list, x0):
         n = len(ts_list)
@@ -2045,12 +2062,22 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
         cons_points = None
         if has_pv and pv_sum_list is not None and n == len(pv_sum_list):
             pv_points = _series_to_points(_smooth_series(pv_sum_list), xs)
-            _fill_area(pv_points, density=0.28, seed=2)
         if cons_list is not None and n == len(cons_list):
             cons_points = _series_to_points(_smooth_series(cons_list), xs)
-            _fill_area(cons_points, density=0.45, seed=5)
-        if pv_points and cons_points:
-            _fill_overlap(pv_points, cons_points, density=0.65, seed=9)
+        if pv_points or cons_points:
+            mask_pv = Image.new("1", img.size, 0)
+            mask_cons = Image.new("1", img.size, 0)
+            if pv_points:
+                _draw_mask_from_points(ImageDraw.Draw(mask_pv), pv_points)
+            if cons_points:
+                _draw_mask_from_points(ImageDraw.Draw(mask_cons), cons_points)
+            if pv_points:
+                img.paste(light_pattern, (0, 0), mask_pv)
+            if cons_points:
+                img.paste(dark_pattern, (0, 0), mask_cons)
+            if pv_points and cons_points:
+                pv_only = ImageChops.logical_and(mask_pv, ImageChops.invert(mask_cons))
+                img.paste(dark_pattern, (0, 0), pv_only)
         # Min/Max Labels
         vmin_i, vmax_i = val_list.index(min(val_list)), val_list.index(max(val_list))
         for idx in (vmin_i, vmax_i):
@@ -2081,7 +2108,7 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
     legend_y = Y0 - 18
     legend_x = X1 - 320
     cursor = legend_x
-    for label, density, seed in (("PV", 0.28, 2), ("Verbrauch", 0.45, 5), ("Überschnitt", 0.65, 9)):
+    for label, density in (("PV", 0.6), ("Verbrauch", 0.9), ("PV>Verbrauch", 0.9)):
         d.text((cursor, legend_y), label, font=fonts['tiny'], fill=0)
         label_w, _ = _text_size(d, label, fonts['tiny'])
         box_x = cursor + label_w + 4
@@ -2090,7 +2117,6 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             [(box_x, legend_y + 2), (box_x + 12, legend_y + 2),
              (box_x + 12, legend_y + 12), (box_x, legend_y + 12)],
             density=density,
-            seed=seed,
         )
         cursor = box_x + 18
     d.text((cursor, legend_y), "Preis", font=fonts['tiny'], fill=0)
