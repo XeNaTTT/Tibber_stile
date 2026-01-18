@@ -1941,15 +1941,6 @@ def draw_weather_box(d, img, x, y, w, h, fonts, hourly_map, sun_today_h=None, su
     if ECO_DEBUG and code is not None:
         lines.append(f"Code: {code}")
 
-    def bucket_for(dt_target):
-        code_day, _ = hourly_map.get(dt_target, (None, None))
-        return meteo_bucket(code_day) if code_day is not None else "-"
-
-    today_noon = dt.datetime(now.year, now.month, now.day, 12, tzinfo=LOCAL_TZ)
-    tomorrow = now + dt.timedelta(days=1)
-    tomorrow_noon = dt.datetime(tomorrow.year, tomorrow.month, tomorrow.day, 12, tzinfo=LOCAL_TZ)
-    lines.append(f"Heute: {bucket_for(today_noon)}")
-    lines.append(f"Morgen: {bucket_for(tomorrow_noon)}")
     lines.append(f"Sonne heute: {_fmt_hours(sun_today_h)} h")
     lines.append(f"Sonne morgen: {_fmt_hours(sun_tomorrow_h)} h")
 
