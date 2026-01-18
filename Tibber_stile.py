@@ -41,13 +41,6 @@ logging.basicConfig(level=logging.INFO)
 SUN_TODAY = None
 SUN_TOMORROW = None
 
-# Rendering pipeline
-RENDER_SCALE = 2
-DITHER_MODE = "BAYER"  # "BAYER" or "FS"
-BAYER_MATRIX = 8       # 8 or 16
-GAMMA = 1.10
-CONTRAST = 1.08
-
 # Weather icon config
 WEATHER_ICON_DIR = "/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/Wettersymbole"
 WEATHER_ICON_WIDTH = 240
@@ -1690,21 +1683,6 @@ def _text_size(d, text, font):
     bbox = d.textbbox((0, 0), text, font=font)
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
-def _s(value, scale):
-    return int(round(value * scale))
-
-def _text(d, x, y, text, font, fill=0):
-    d.text((int(round(x)), int(round(y))), text, font=font, fill=fill)
-
-
-def _load_truetype_font(candidates, size):
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size)
-        except Exception:
-            continue
-    return None
-
 
 def _fmt_hours(value):
     if value is None:
@@ -1715,62 +1693,90 @@ def _fmt_hours(value):
         return "-"
 
 
-_BAYER_MATRIX_CACHE = {}
+_BAYER_4X4 = [
+    [0, 8, 2, 10],
+    [12, 4, 14, 6],
+    [3, 11, 1, 9],
+    [15, 7, 13, 5],
+]
 
-def _build_bayer_matrix(size):
-    if size == 2:
-        return [[0, 2], [3, 1]]
-    if size % 2 != 0:
-        raise ValueError("Bayer size must be power of two.")
-    half = size // 2
-    prev = _build_bayer_matrix(half)
-    out = [[0 for _ in range(size)] for _ in range(size)]
-    for y in range(half):
-        for x in range(half):
-            v = prev[y][x] * 4
-            out[y][x] = v
-            out[y][x + half] = v + 2
-            out[y + half][x] = v + 3
-            out[y + half][x + half] = v + 1
-    return out
+_BAYER_8X8 = [
+    [0, 32, 8, 40, 2, 34, 10, 42],
+    [48, 16, 56, 24, 50, 18, 58, 26],
+    [12, 44, 4, 36, 14, 46, 6, 38],
+    [60, 28, 52, 20, 62, 30, 54, 22],
+    [3, 35, 11, 43, 1, 33, 9, 41],
+    [51, 19, 59, 27, 49, 17, 57, 25],
+    [15, 47, 7, 39, 13, 45, 5, 37],
+    [63, 31, 55, 23, 61, 29, 53, 21],
+]
 
-def _get_bayer_matrix(size):
-    if size not in _BAYER_MATRIX_CACHE:
-        _BAYER_MATRIX_CACHE[size] = _build_bayer_matrix(size)
-    return _BAYER_MATRIX_CACHE[size]
-
-def render_to_epd(img_l):
-    """Finale Dither-Konvertierung nach 1-bit."""
-    if img_l.mode != "L":
-        img_l = img_l.convert("L")
-    if GAMMA and CONTRAST and (GAMMA != 1.0 or CONTRAST != 1.0):
-        lut = []
-        gamma = float(GAMMA)
-        contrast = float(CONTRAST)
-        for i in range(256):
-            v = i / 255.0
-            if gamma != 1.0:
-                v = pow(v, 1.0 / gamma)
-            if contrast != 1.0:
-                v = (v - 0.5) * contrast + 0.5
-            v = max(0.0, min(1.0, v))
-            lut.append(int(round(v * 255)))
-        img_l = img_l.point(lut)
-    if DITHER_MODE == "FS":
-        return img_l.convert("1", dither=Image.FLOYDSTEINBERG)
-    matrix = _get_bayer_matrix(16 if BAYER_MATRIX == 16 else 8)
-    size = len(matrix)
+def _ordered_dither_bayer(image_l, matrix=_BAYER_8X8, strength=0.0, level=None):
+    if image_l.mode != "L":
+        image_l = image_l.convert("L")
+    m = matrix or _BAYER_8X8
+    size = len(m)
+    strength = max(0.0, min(1.0, float(strength)))
+    if level is not None:
+        bias = max(0, min(255, int(level)))
+    else:
+        bias = int(round(90 * strength))
     threshold_scale = 255.0 / (size * size)
-    w, h = img_l.size
+    w, h = image_l.size
     out = Image.new("1", (w, h), 1)
-    src = img_l.load()
+    src = image_l.load()
     dst = out.load()
     for y in range(h):
-        row = matrix[y % size]
+        row = m[y % size]
         for x in range(w):
+            v = src[x, y]
+            v = max(0, min(255, v - bias))
             threshold = (row[x % size] + 0.5) * threshold_scale
-            dst[x, y] = 0 if src[x, y] < threshold else 255
+            dst[x, y] = 0 if v < threshold else 255
     return out
+
+
+def _make_bayer_tile(density, size=8):
+    density = max(0.0, min(1.0, float(density)))
+    threshold = density * (size * size)
+    tile = Image.new("1", (size, size), 1)
+    px = tile.load()
+    for y in range(size):
+        for x in range(size):
+            if _BAYER_8X8[y][x] < threshold:
+                px[x, y] = 0
+    return tile
+
+
+def _tile_pattern(tile, size):
+    pattern = Image.new("1", size, 1)
+    tw, th = tile.size
+    for y in range(0, size[1], th):
+        for x in range(0, size[0], tw):
+            pattern.paste(tile, (x, y))
+    return pattern
+
+
+def _paste_dithered_polygon(img, polygon, density=0.3):
+    if not polygon:
+        return
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    min_x = int(max(min(xs), 0))
+    min_y = int(max(min(ys), 0))
+    max_x = int(min(max(xs), img.width - 1))
+    max_y = int(min(max(ys), img.height - 1))
+    if max_x <= min_x or max_y <= min_y:
+        return
+    bbox_w = max_x - min_x + 1
+    bbox_h = max_y - min_y + 1
+    mask = Image.new("1", (bbox_w, bbox_h), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    offset_polygon = [(x - min_x, y - min_y) for (x, y) in polygon]
+    mask_draw.polygon(offset_polygon, fill=1)
+    tile = _make_bayer_tile(density)
+    pattern = _tile_pattern(tile, (bbox_w, bbox_h))
+    img.paste(pattern, (min_x, min_y), mask)
 
 
 def _smooth_series(series, window=3):
@@ -1807,7 +1813,7 @@ def meteo_bucket(code):
 
 def draw_weather_icon(draw, x, y, size, code, is_day, fill=0):
     scale = max(1.0, float(size) / 40.0)
-    width = max(1, int(round(1.0 * scale)))
+    width = 2
     stroke = fill
 
     def sx(v):
@@ -1916,25 +1922,10 @@ def draw_weather_icon(draw, x, y, size, code, is_day, fill=0):
         draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
 
 
-def _draw_card(d, x, y, w, h, scale=1.0, fill=245, outline=0, shadow=232):
-    """Kachel-Container mit dezentem Schatten."""
-    radius = _s(8, scale)
-    outline_w = max(1, int(round(scale)))
-    shadow_offset = max(1, int(round(2 * scale)))
-    if shadow is not None:
-        d.rounded_rectangle(
-            (x + shadow_offset, y + shadow_offset, x + w + shadow_offset, y + h + shadow_offset),
-            radius=radius,
-            fill=shadow,
-            outline=None,
-        )
-    d.rounded_rectangle((x, y, x + w, y + h), radius=radius, fill=fill, outline=outline, width=outline_w)
-
-
-def draw_weather_box(d, img, x, y, w, h, fonts, hourly_map, sun_today_h=None, sun_tomorrow_h=None, scale=1.0):
-    _draw_card(d, x, y, w, h, scale=scale)
-    icon_size = _s(40, scale)
-    icon_x = x + _s(10, scale)
+def draw_weather_box(d, img, x, y, w, h, fonts, hourly_map, sun_today_h=None, sun_tomorrow_h=None):
+    d.rectangle((x, y, x + w, y + h), outline=0, width=2)
+    icon_size = 40
+    icon_x = x + 10
     icon_y = y + int((h - icon_size) / 2)
 
     now = dt.datetime.now(LOCAL_TZ)
@@ -1953,17 +1944,15 @@ def draw_weather_box(d, img, x, y, w, h, fonts, hourly_map, sun_today_h=None, su
             logging.warning("Weather-Icon laden fehlgeschlagen: %s", e)
     if icon is not None:
         icon = icon.resize((icon_size, icon_size), resample=Image.NEAREST)
-        icon_l = icon.convert("L")
-        mask = ImageChops.invert(icon_l)
-        img.paste(0, (icon_x, icon_y), mask)
+        img.paste(icon, (icon_x, icon_y))
     elif code is not None:
         draw_weather_icon(d, icon_x, icon_y, icon_size, code, is_day, fill=0)
     else:
         draw_weather_icon(d, icon_x, icon_y, icon_size, 3, True, fill=0)
 
     title = "Wetter"
-    title_w, title_h = _text_size(d, title, fonts['title'])
-    text_x = x + _s(60, scale)
+    title_w, title_h = _text_size(d, title, fonts['bold'])
+    text_x = x + 60
     lines = []
     if ECO_DEBUG and code is not None:
         lines.append(f"Code: {code}")
@@ -1971,14 +1960,14 @@ def draw_weather_box(d, img, x, y, w, h, fonts, hourly_map, sun_today_h=None, su
     lines.append(f"Sonne heute: {_fmt_hours(sun_today_h)} h")
     lines.append(f"Sonne morgen: {_fmt_hours(sun_tomorrow_h)} h")
 
-    line_heights = [title_h] + [_text_size(d, line, fonts['body'])[1] for line in lines]
-    total_h = sum(line_heights) + _s(6, scale)
-    start_y = y + max(_s(6, scale), int((h - total_h) / 2))
-    _text(d, text_x, start_y, title, font=fonts['title'], fill=0)
-    line_y = start_y + title_h + _s(4, scale)
+    line_heights = [title_h] + [_text_size(d, line, fonts['small'])[1] for line in lines]
+    total_h = sum(line_heights) + 6
+    start_y = y + max(6, int((h - total_h) / 2))
+    d.text((text_x, start_y), title, font=fonts['bold'], fill=0)
+    line_y = start_y + title_h + 4
     for line in lines:
-        _text(d, text_x, line_y, line, font=fonts['body'], fill=0)
-        line_y += _text_size(d, line, fonts['body'])[1] + _s(2, scale)
+        d.text((text_x, line_y), line, font=fonts['small'], fill=0)
+        line_y += _text_size(d, line, fonts['small'])[1] + 2
 
 def minutes_to_hhmm(m):
     if m is None:
@@ -1990,32 +1979,28 @@ def minutes_to_hhmm(m):
         return "-"
 
 
-def draw_battery(d, x, y, w, h, soc, arrow=None, fonts=None, scale=1.0):
+def draw_battery(d, x, y, w, h, soc, arrow=None, fonts=None):
     soc = max(0, min(100, int(soc) if soc is not None else 0))
-    stroke = max(1, int(round(scale)))
-    cap_w = _s(6, scale)
-    inset = _s(3, scale)
-    d.rounded_rectangle((x, y, x + w, y + h), radius=_s(4, scale), outline=0, width=stroke, fill=255)
-    d.rectangle((x + w, y + h * 0.35, x + w + cap_w, y + h * 0.65), outline=0, width=stroke)
-    inner_w = max(0, int((w - cap_w) * soc / 100))
-    d.rectangle((x + inset, y + inset, x + inset + inner_w, y + h - inset), fill=0)
-    if fonts:
-        _text(d, x + w + _s(12, scale), y + h / 2 - _s(7, scale), f"{soc}%", font=fonts['body'], fill=0)
+    d.rectangle((x, y, x+w, y+h), outline=0, width=2)
+    d.rectangle((x+w, y+h*0.35, x+w+6, y+h*0.65), outline=0, width=2)
+    inner_w = max(0, int((w-6) * soc/100))
+    d.rectangle((x+3, y+3, x+3+inner_w, y+h-3), fill=0)
+    if fonts: d.text((x+w+12, y+h/2-7), f"{soc}%", font=fonts['small'], fill=0)
     # Der frühere Lade-/Entladepfeil wird nicht mehr gezeichnet, da die
     # Richtung aus den Rohdaten nicht zuverlässig ermittelt werden konnte.
 
-def draw_ecoflow_box(d, x, y, w, h, fonts, st, scale=1.0):
-    _draw_card(d, x, y, w, h, scale=scale)
+def draw_ecoflow_box(d, x, y, w, h, fonts, st):
+    d.rectangle((x, y, x + w, y + h), outline=0, width=2)
     title = "EcoFlow Stream AC"
-    title_w, title_h = _text_size(d, title, fonts['title'])
-    title_x = x + _s(10, scale)
-    title_y = y + _s(6, scale)
-    _text(d, title_x, title_y, title, font=fonts['title'], fill=0)
+    title_w, title_h = _text_size(d, title, fonts['bold'])
+    title_x = x + 10
+    title_y = y + 4
+    d.text((title_x, title_y), title, font=fonts['bold'], fill=0)
 
     # Batterie
-    batt_x = x + _s(12, scale)
-    batt_y = y + int((h - _s(28, scale)) / 2)
-    draw_battery(d, batt_x, batt_y, _s(90, scale), _s(28, scale), st.get('soc'), arrow=None, fonts=fonts, scale=scale)
+    batt_x = x + 12
+    batt_y = y + int((h - 28) / 2)
+    draw_battery(d, batt_x, batt_y, 90, 28, st.get('soc'), arrow=None, fonts=fonts)
 
     # Hilfsfunktion
     def fmt_w(v):
@@ -2031,11 +2016,11 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st, scale=1.0):
     load_w  = st.get('load_w') or st.get('powGetSysLoad')
 
     # Rechenweg: Leistung + PV-Ertrag + Netz = Last
-    base_x = x + w - _s(175, scale)  # etwas weiter nach links geschoben
+    base_x = x + w - 175  # etwas weiter nach links geschoben
     op_x   = base_x
-    lbl_x  = base_x + _s(12, scale)
-    val_x  = base_x + _s(105, scale)
-    row_height = _s(14, scale)
+    lbl_x  = base_x + 12
+    val_x  = base_x + 105
+    row_height = 14
 
     entries = [
         ("", "Batterieleistung", power_w),  # Batterie (+ Entladen, - Laden)
@@ -2043,31 +2028,31 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st, scale=1.0):
         ("+", "Netz", grid_w)               # Bezug (+) / Einspeisung (-)
     ]
     block_h = len(entries) * row_height + 14
-    base_y = y + max(_s(4, scale), int((h - block_h) / 2))
+    base_y = y + max(4, int((h - block_h) / 2))
 
     for i, (op, label, value) in enumerate(entries):
         y_row = base_y + i * row_height
         if op:
-            _text(d, op_x, y_row, op, font=fonts['tiny'], fill=0)
-        _text(d, lbl_x, y_row, f"{label}:", font=fonts['tiny'], fill=0)
-        _text(d, val_x, y_row, fmt_w(value), font=fonts['tiny'], fill=0)
+            d.text((op_x, y_row), op, font=fonts['tiny'], fill=0)
+        d.text((lbl_x, y_row), f"{label}:", font=fonts['tiny'], fill=0)
+        d.text((val_x, y_row), fmt_w(value), font=fonts['tiny'], fill=0)
 
     # Trennlinie vor dem Ergebnis
-    line_y = base_y + len(entries) * row_height + _s(3, scale)
-    d.line((base_x, line_y, base_x + _s(120, scale), line_y), fill=0, width=max(1, int(round(scale))))
+    line_y = base_y + len(entries) * row_height + 3
+    d.line((base_x, line_y, base_x + 120, line_y), fill=0, width=1)
 
-    result_y = line_y + _s(4, scale)
-    _text(d, op_x, result_y, "=", font=fonts['tiny'], fill=0)
-    _text(d, lbl_x, result_y, "Last:", font=fonts['tiny'], fill=0)
-    _text(d, val_x, result_y, fmt_w(load_w), font=fonts['tiny'], fill=0)
+    result_y = line_y + 4
+    d.text((op_x, result_y), "=", font=fonts['tiny'], fill=0)
+    d.text((lbl_x, result_y), "Last:", font=fonts['tiny'], fill=0)
+    d.text((val_x, result_y), fmt_w(load_w), font=fonts['tiny'], fill=0)
     micro_online = st.get("micro_online")
     if micro_online is not None:
         micro_label = f"Micro online={1 if micro_online else 0}"
-        _text(d, x + _s(10, scale), y + h - _s(16, scale), micro_label, font=fonts['tiny'], fill=0)
+        d.text((x + 10, y + h - 14), micro_label, font=fonts['tiny'], fill=0)
 
 
-def draw_info_box(d, info, fonts, y, width, scale=1.0):
-    x0 = _s(10, scale)
+def draw_info_box(d, info, fonts, y, width):
+    x0 = 10
     low_time = info.get('lowest_today_time')
     low_lbl = (f"{info['lowest_today']/100:.2f} ct @ {low_time.strftime('%H:%M')}"
                if low_time else f"{info['lowest_today']/100:.2f} ct")
@@ -2076,19 +2061,19 @@ def draw_info_box(d, info, fonts, y, width, scale=1.0):
         ("Tief heute",  low_lbl),
         ("Hoch heute",  f"{info['highest_today']/100:.2f} ct"),
     ]
-    colw = width / len(items)
+    colw = width/len(items)
     for i,(k,v) in enumerate(items):
         label = f"{k}: {v}"
         label_w, label_h = _text_size(d, label, fonts['bold'])
         col_x = x0 + i * colw
         tx = col_x + (colw - label_w) / 2
         ty = y - label_h / 2
-        _text(d, tx, ty, label, font=fonts['bold'], fill=0)
+        d.text((tx, ty), label, font=fonts['bold'], fill=0)
 
 def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
                        pv_left=None, pv_right=None,
                        cons_left=None, cons_right=None,
-                       cur_dt=None, cur_price=None, scale=1.0):
+                       cur_dt=None, cur_price=None):
     PRICE_MIN_CENT = 5
     PRICE_MAX_CENT = 60
 
@@ -2139,26 +2124,33 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
 
     has_pv = any(_series_has_values(s) for s in (pv_sum_left, pv_sum_right))
 
-    stroke = max(1, int(round(scale)))
     # Preis-Y-Ticks (nur innerhalb)
     step = 5
     yv = math.floor(vmin/step) * step
     while yv <= vmax:
         yy = _price_to_y(yv)
         if Y0 < yy < Y1:
-            _text(d, X0 - _s(45, scale), yy - _s(7, scale), f"{yv/100:.2f}", font=fonts['tiny'], fill=0)
+            d.text((X0-45, yy-7), f"{yv/100:.2f}", font=fonts['tiny'], fill=0)
         yv += step
 
-    def _price_step_points(xs, val_list):
-        points = []
-        for i, x in enumerate(xs):
-            y = _price_to_y(val_list[i])
-            if i == 0:
-                points.append((x, y))
-            else:
-                points.append((x, points[-1][1]))
-                points.append((x, y))
-        return points
+    def _draw_price_shadow(xs, val_list):
+        shadow_h = 40
+        for i in range(len(xs) - 1):
+            x_start = int(xs[i])
+            x_end = int(xs[i + 1])
+            y_base = int(_price_to_y(val_list[i]))
+            for offset in range(1, shadow_h + 1):
+                y = y_base + offset
+                if y >= Y1:
+                    break
+                density = max(0.0, (shadow_h - offset) / shadow_h)
+                step = 6
+                threshold = max(1, int(round(density * step)))
+                if threshold <= 0:
+                    continue
+                for x in range(x_start, x_end + 1, 2):
+                    if ((x + offset) % step) < threshold:
+                        d.point((x, y), fill=0)
 
     def _series_to_points(series, xs):
         points = []
@@ -2201,12 +2193,11 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
         for segment in _segments_from_points(series_points):
             smooth = _densify_points(segment, steps=4)
             polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
-            mask_draw.polygon(polygon, fill=255)
+            mask_draw.polygon(polygon, fill=1)
 
-    price_fill = 232
-    pv_fill = 205
-    cons_fill = 165
-    overlap_fill = 185
+    dark_pattern = _tile_pattern(_make_bayer_tile(0.9), img.size)
+    pv_fill_gray = 200
+    pv_dither_strength = 0.3
 
     def panel(ts_list, val_list, pv_sum_list, cons_list, x0):
         n = len(ts_list)
@@ -2219,47 +2210,47 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
         if cons_list is not None and n == len(cons_list):
             cons_points = _series_to_points(_smooth_series(cons_list), xs)
         if pv_points or cons_points:
-            mask_pv = Image.new("L", img.size, 0)
-            mask_cons = Image.new("L", img.size, 0)
+            mask_pv = Image.new("1", img.size, 0)
+            mask_cons = Image.new("1", img.size, 0)
             if pv_points:
                 _draw_mask_from_points(ImageDraw.Draw(mask_pv), pv_points)
             if cons_points:
                 _draw_mask_from_points(ImageDraw.Draw(mask_cons), cons_points)
             if cons_points:
-                cons_only = ImageChops.subtract(mask_cons, mask_pv)
-                img.paste(cons_fill, (0, 0), cons_only)
-            if pv_points:
-                pv_only = ImageChops.subtract(mask_pv, mask_cons)
-                img.paste(pv_fill, (0, 0), pv_only)
+                img.paste(dark_pattern, (0, 0), mask_cons)
             if pv_points and cons_points:
-                overlap = ImageChops.multiply(mask_pv, mask_cons)
-                img.paste(overlap_fill, (0, 0), overlap)
-        step_points = _price_step_points(xs, val_list)
-        if step_points:
-            price_mask = Image.new("L", img.size, 0)
-            price_draw = ImageDraw.Draw(price_mask)
-            polygon = step_points + [(step_points[-1][0], Y1), (step_points[0][0], Y1)]
-            price_draw.polygon(polygon, fill=255)
-            img.paste(price_fill, (0, 0), price_mask)
+                pv_only = ImageChops.logical_and(mask_pv, ImageChops.invert(mask_cons))
+                img.paste(dark_pattern, (0, 0), pv_only)
+        if pv_points:
+            pv_layer = Image.new("L", img.size, 255)
+            pv_draw = ImageDraw.Draw(pv_layer)
+            for segment in _segments_from_points(pv_points):
+                smooth = _densify_points(segment, steps=4)
+                polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
+                pv_draw.polygon(polygon, fill=pv_fill_gray)
+            pv_mask = pv_layer.point(lambda p: 255 if p < 255 else 0)
+            pv_dither = _ordered_dither_bayer(pv_layer, matrix=_BAYER_8X8, strength=pv_dither_strength)
+            img.paste(pv_dither, (0, 0), pv_mask)
+        _draw_price_shadow(xs, val_list)
         # Preis Stufenlinie
         for i in range(n-1):
             x1, y1 = xs[i],   _price_to_y(val_list[i])
             x2, y2 = xs[i+1], _price_to_y(val_list[i+1])
-            d.line((x1,y1, x2,y1), fill=0, width=stroke)
-            d.line((x2,y1, x2,y2), fill=0, width=stroke)
+            d.line((x1,y1, x2,y1), fill=0, width=2)
+            d.line((x2,y1, x2,y2), fill=0, width=2)
         # Min/Max Labels
         vmin_i, vmax_i = val_list.index(min(val_list)), val_list.index(max(val_list))
         for idx in (vmin_i, vmax_i):
             xi, yi = xs[idx], _price_to_y(val_list[idx])
-            _text(d, xi - _s(12, scale), yi - _s(12, scale), f"{val_list[idx]/100:.2f}", font=fonts['tiny'], fill=0)
+            d.text((xi-12, yi-12), f"{val_list[idx]/100:.2f}", font=fonts['tiny'], fill=0)
 
     panel(tl, vl, pv_sum_left, cons_left, X0)
-    d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=stroke)
+    d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
     panel(tr, vr, pv_sum_right, cons_right, X0+PW)
 
     # Subtitles unter Achse
-    _text(d, X0 + _s(5, scale), Y1 + _s(28, scale), subtitles[0], font=fonts['bold'], fill=0)
-    _text(d, X0 + PW + _s(5, scale), Y1 + _s(28, scale), subtitles[1], font=fonts['bold'], fill=0)
+    d.text((X0+5,    Y1+28), subtitles[0], font=fonts['bold'], fill=0)
+    d.text((X0+PW+5, Y1+28), subtitles[1], font=fonts['bold'], fill=0)
 
     # Stundenbeschriftung
     def hour_ticks(ts_list, x0):
@@ -2268,24 +2259,29 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
         xs = [x0 + i*(PW/(n-1)) for i in range(n)]
         for i,t in enumerate(ts_list):
             if t.minute == 0:
-                d.line((xs[i], Y1, xs[i], Y1 + _s(4, scale)), fill=0, width=max(1, int(round(scale))))
-                _text(d, xs[i] - _s(8, scale), Y1 + _s(6, scale), t.strftime("%H"), font=fonts['tiny'], fill=0)
+                d.line((xs[i], Y1, xs[i], Y1+4), fill=0, width=1)
+                d.text((xs[i]-8, Y1+6), t.strftime("%H"), font=fonts['tiny'], fill=0)
     hour_ticks(tl, X0)
     hour_ticks(tr, X0+PW)
 
     # Legende Leistung
-    legend_y = Y0 - _s(18, scale)
-    legend_x = X1 - _s(320, scale)
+    legend_y = Y0 - 18
+    legend_x = X1 - 320
     cursor = legend_x
-    for label, shade in (("PV", pv_fill), ("Verbrauch", cons_fill), ("PV>Verbrauch", overlap_fill)):
-        _text(d, cursor, legend_y, label, font=fonts['tiny'], fill=0)
+    for label, density in (("PV", 0.6), ("Verbrauch", 0.9), ("PV>Verbrauch", 0.9)):
+        d.text((cursor, legend_y), label, font=fonts['tiny'], fill=0)
         label_w, _ = _text_size(d, label, fonts['tiny'])
-        box_x = cursor + label_w + _s(4, scale)
-        img.paste(shade, (box_x, legend_y + _s(2, scale), box_x + _s(12, scale), legend_y + _s(12, scale)))
-        cursor = box_x + _s(18, scale)
-    _text(d, cursor, legend_y, "Preis", font=fonts['tiny'], fill=0)
+        box_x = cursor + label_w + 4
+        _paste_dithered_polygon(
+            img,
+            [(box_x, legend_y + 2), (box_x + 12, legend_y + 2),
+             (box_x + 12, legend_y + 12), (box_x, legend_y + 12)],
+            density=density,
+        )
+        cursor = box_x + 18
+    d.text((cursor, legend_y), "Preis", font=fonts['tiny'], fill=0)
     if not has_pv:
-        _text(d, X0 + _s(6, scale), Y0 + _s(6, scale), "PV DB leer - keine PV-Linien", font=fonts['tiny'], fill=0)
+        d.text((X0 + 6, Y0 + 6), "PV DB leer - keine PV-Linien", font=fonts['tiny'], fill=0)
 
     # Minutengenauer Marker (horizontale Interpolation)
     if cur_price is not None:
@@ -2315,22 +2311,21 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
                 slot_w = PW / (n - 1)
                 px = x0_panel + i_float * slot_w
                 py = _price_to_y(cur_price)
-                draw_dashed_line(d, px, py, px, Y1 + _s(4, scale), dash=_s(2, scale), gap=_s(3, scale), fill=0, width=max(1, int(round(scale))))
-                r = _s(6, scale)
+                draw_dashed_line(d, px, py, px, Y1 + 4, dash=2, gap=3, fill=0, width=1)
+                r = 6
                 d.ellipse((px - r, py - r, px + r, py + r), fill=0)
                 label = f"{cur_price/100:.2f} ct  {marker_dt.strftime('%H:%M')}"
-                tx = px + r + _s(4, scale)
-                ty = py - r - _s(10, scale)
-                tx = min(tx, X1 - _s(160, scale))
-                ty = max(ty, Y0 - _s(18, scale))
-                _text(d, tx, ty, label, font=fonts['tiny'], fill=0)
+                tx = px + r + 4
+                ty = py - r - 10
+                tx = min(tx, X1 - 160)
+                ty = max(ty, Y0 - 18)
+                d.text((tx, ty), label, font=fonts['tiny'], fill=0)
 
 # ---------- Main ----------
 def main():
     epd = epd7in5_V2.EPD()
     epd.init(); epd.Clear()
     w, h = epd.width, epd.height
-    scale = RENDER_SCALE
 
     # Daten laden, robust gegen API-Ausfall
     tibber_source = "api"
@@ -2468,96 +2463,55 @@ def main():
     else:
         pv_right = get_pv_series_db(tr_dt)
 
-    # Canvas (hi-res in L)
-    img_hi = Image.new("L", (w * scale, h * scale), 255)
-    d_hi = ImageDraw.Draw(img_hi)
+    # Canvas
+    img  = Image.new('1', (w, h), 255)
+    d    = ImageDraw.Draw(img)
 
-    # Fonts (hi-res)
-    f_title = _load_truetype_font(
-        ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "DejaVuSans-Bold.ttf"],
-        _s(18, scale),
-    )
-    f_bold = _load_truetype_font(
-        ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "DejaVuSans-Bold.ttf"],
-        _s(14, scale),
-    )
-    f_body = _load_truetype_font(
-        ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "DejaVuSans.ttf"],
-        _s(14, scale),
-    )
-    f_tiny = _load_truetype_font(
-        ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "DejaVuSans.ttf"],
-        _s(11, scale),
-    )
-    if not all([f_title, f_bold, f_body, f_tiny]):
-        logging.warning("Falling back to PIL default font; text may appear smaller without DejaVu fonts.")
-        f_title = f_title or ImageFont.load_default()
-        f_bold = f_bold or ImageFont.load_default()
-        f_body = f_body or ImageFont.load_default()
-        f_tiny = f_tiny or ImageFont.load_default()
-    fonts = {'title': f_title, 'bold': f_bold, 'body': f_body, 'tiny': f_tiny}
+    # Fonts
+    try:
+        f_bold  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+        f_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+        f_tiny  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
+    except Exception:
+        f_bold = f_small = f_tiny = ImageFont.load_default()
+    fonts = {'bold': f_bold, 'small': f_small, 'tiny': f_tiny}
 
     # Layout
     margin = 10
-    header_h = 34
-    card_h = 78
-    box_w = (w - margin * 3) / 2
-
-    # Header bar
-    header_y = _s(header_h, scale)
-    header_text = "TRMNL Energy"
-    update_ts = dt.datetime.now(LOCAL_TZ).strftime("%H:%M %d.%m.%Y")
-    _text(d_hi, _s(margin, scale), _s(8, scale), header_text, font=fonts['title'], fill=0)
-    ts_w, _ = _text_size(d_hi, update_ts, fonts['tiny'])
-    _text(d_hi, img_hi.width - _s(margin, scale) - ts_w, _s(12, scale), update_ts, font=fonts['tiny'], fill=0)
-    d_hi.line((0, header_y, img_hi.width, header_y), fill=0, width=max(1, int(round(scale))))
-
-    # Cards
-    card_y = header_h + margin
+    top_h  = 70
+    box_w  = (w - margin*3)//2
     draw_weather_box(
-        d_hi,
-        img_hi,
-        _s(margin, scale),
-        _s(card_y, scale),
-        _s(box_w, scale),
-        _s(card_h, scale),
+        d,
+        img,
+        margin,
+        margin,
+        box_w,
+        top_h,
         fonts,
         hourly_map,
         sun_today_h=sun_today_h,
         sun_tomorrow_h=sun_tomorrow_h,
-        scale=scale,
     )
-    draw_ecoflow_box(
-        d_hi,
-        _s(margin * 2 + box_w, scale),
-        _s(card_y, scale),
-        _s(box_w, scale),
-        _s(card_h, scale),
-        fonts,
-        eco,
-        scale=scale,
-    )
+    draw_ecoflow_box(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
 
-    # Info row
-    info_y = card_y + card_h + 14
-    draw_info_box(d_hi, info, fonts, y=_s(info_y, scale), width=_s(w - 20, scale), scale=scale)
+    # Info-Zeile tiefer und zentriert
+    draw_info_box(d, info, fonts, y=top_h + margin + 18, width=w-20)
 
-    # Chart area
-    chart_top = info_y + 28
-    chart_area = (_s(margin, scale), _s(chart_top, scale), _s(w - margin, scale), _s(h - 22, scale))
+    # Chart kleiner in der HÃ¶he + Platz fÃ¼r Stunden
+    chart_top = top_h + margin + 48
+    chart_area = (margin, chart_top, w - margin, h-70)
 
     draw_two_day_chart(
-        img_hi, d_hi, left, right, fonts, labels, chart_area,
+        img, d, left, right, fonts, labels, chart_area,
         pv_left=pv_left, pv_right=pv_right,
         cons_left=cons_left, cons_right=cons_right,
-        cur_dt=info['current_dt'], cur_price=info['current_price'],
-        scale=scale,
+        cur_dt=info['current_dt'], cur_price=info['current_price']
     )
 
-    img_lo = img_hi.resize((w, h), Image.LANCZOS)
-    final_img = render_to_epd(img_lo)
+    footer = dt.datetime.now(LOCAL_TZ).strftime("Update: %H:%M %d.%m.%Y")
+    d.text((10, h-10), footer, font=fonts['tiny'], fill=0)
 
-    epd.display(epd.getbuffer(final_img))
+    epd.display(epd.getbuffer(img))
     epd.sleep()
 
 
