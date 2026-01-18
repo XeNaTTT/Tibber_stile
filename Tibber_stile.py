@@ -313,19 +313,24 @@ def _filter_range_for_date(nodes, date_obj):
             out.append({"startsAt": n["startsAt"], "total": n["total"]})
     return out
 
-def prepare_info(pi):
-    today = pi['today']
-    today_vals = [s['total']*100 for s in today]
-    cur = pi['current']
+def prepare_info(today_slots, current):
+    today_vals = [s["total"] * 100 for s in today_slots]
+    cur = current or {}
+    cur_start = cur.get("startsAt") or dt.datetime.now(LOCAL_TZ).isoformat()
+    cur_dt = dt.datetime.fromisoformat(cur_start).astimezone(LOCAL_TZ)
+    cur_price = float(cur.get("total") or 0) * 100
     low_idx = int(np.argmin(today_vals)) if today_vals else None
-    low_time = (dt.datetime.fromisoformat(today[low_idx]['startsAt']).astimezone(LOCAL_TZ)
-                if low_idx is not None else None)
+    low_time = (
+        dt.datetime.fromisoformat(today_slots[low_idx]["startsAt"]).astimezone(LOCAL_TZ)
+        if low_idx is not None
+        else None
+    )
     return {
-        'current_dt': dt.datetime.fromisoformat(cur['startsAt']).astimezone(LOCAL_TZ),
-        'current_price': cur['total']*100,
-        'lowest_today': min(today_vals) if today_vals else 0,
-        'lowest_today_time': low_time,
-        'highest_today': max(today_vals) if today_vals else 0
+        "current_dt": cur_dt,
+        "current_price": cur_price,
+        "lowest_today": min(today_vals) if today_vals else 0,
+        "lowest_today_time": low_time,
+        "highest_today": max(today_vals) if today_vals else 0,
     }
 
 # ---------- 15-Min Transformation ----------
@@ -366,6 +371,22 @@ def slots_to_15min(slots):
             return ts_list, val_list
 
     return expand_to_15min(slots)
+
+def normalize_price_slots_15min(slots):
+    if not slots:
+        return []
+    ts_list, val_list = slots_to_15min(slots)
+    return [
+        {"startsAt": ts.isoformat(), "total": val / 100.0}
+        for ts, val in zip(ts_list, val_list)
+    ]
+
+def pick_current_price(quarter_range, fallback):
+    for src in (quarter_range, fallback):
+        cur = (src or {}).get("current") or {}
+        if cur.get("startsAt") and cur.get("total") is not None:
+            return cur
+    return {"startsAt": dt.datetime.now(LOCAL_TZ).isoformat(), "total": 0.0}
 
 # ---------- DB-Serien ----------
 def series_from_db(table, column, slots_dt, max_age_hours=48):
@@ -1903,16 +1924,14 @@ def main():
     except Exception as e:
         logging.error("15-Minuten-Preise konnten nicht geladen werden: %s", e)
 
-    info = prepare_info(pi)
-
-    tomorrow = pi.get('tomorrow', [])
+    tomorrow = pi.get("tomorrow", [])
     if tomorrow:
-        left, right = pi['today'], tomorrow
+        left, right = pi["today"], tomorrow
         labels = ("Heute", "Morgen")
         left_date = dt.date.today()
         right_date = dt.date.today() + dt.timedelta(days=1)
     else:
-        left, right = (load_cache(CACHE_YESTERDAY) or {"data": []})['data'], pi['today']
+        left, right = (load_cache(CACHE_YESTERDAY) or {"data": []})["data"], pi["today"]
         labels = ("Gestern", "Heute")
         left_date = dt.date.today() - dt.timedelta(days=1)
         right_date = dt.date.today()
@@ -1924,7 +1943,7 @@ def main():
         labels[1], len(right or [])
     )
 
-    if quarter_range and (quarter_range.get("today") or []) and (quarter_range.get("tomorrow") or []):
+    if quarter_range and (quarter_range.get("today") or quarter_range.get("tomorrow")):
         combined = (quarter_range.get("today") or []) + (quarter_range.get("tomorrow") or [])
         left_q = _filter_range_for_date(combined, left_date)
         right_q = _filter_range_for_date(combined, right_date)
@@ -1939,6 +1958,13 @@ def main():
             safe_get(quarter_range.get("current") or {}, "startsAt", default="-"),
             quarter_range.get("home_id") or "-"
         )
+
+    left = normalize_price_slots_15min(left)
+    right = normalize_price_slots_15min(right)
+
+    today_slots = left if labels[0] == "Heute" else right
+    current_price = pick_current_price(quarter_range, pi)
+    info = prepare_info(today_slots, current_price)
     
 # EcoFlow-Status früh laden (robust) – damit eco immer definiert ist
     eco = {}
