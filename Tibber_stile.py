@@ -1677,6 +1677,13 @@ def _fmt_hours(value):
         return "-"
 
 
+_BAYER_4X4 = [
+    [0, 8, 2, 10],
+    [12, 4, 14, 6],
+    [3, 11, 1, 9],
+    [15, 7, 13, 5],
+]
+
 _BAYER_8X8 = [
     [0, 32, 8, 40, 2, 34, 10, 42],
     [48, 16, 56, 24, 50, 18, 58, 26],
@@ -1687,6 +1694,30 @@ _BAYER_8X8 = [
     [15, 47, 7, 39, 13, 45, 5, 37],
     [63, 31, 55, 23, 61, 29, 53, 21],
 ]
+
+def _ordered_dither_bayer(image_l, matrix=_BAYER_8X8, strength=0.0, level=None):
+    if image_l.mode != "L":
+        image_l = image_l.convert("L")
+    m = matrix or _BAYER_8X8
+    size = len(m)
+    strength = max(0.0, min(1.0, float(strength)))
+    if level is not None:
+        bias = max(0, min(255, int(level)))
+    else:
+        bias = int(round(90 * strength))
+    threshold_scale = 255.0 / (size * size)
+    w, h = image_l.size
+    out = Image.new("1", (w, h), 1)
+    src = image_l.load()
+    dst = out.load()
+    for y in range(h):
+        row = m[y % size]
+        for x in range(w):
+            v = src[x, y]
+            v = max(0, min(255, v - bias))
+            threshold = (row[x % size] + 0.5) * threshold_scale
+            dst[x, y] = 0 if v < threshold else 255
+    return out
 
 
 def _make_bayer_tile(density, size=8):
@@ -1955,7 +1986,7 @@ def draw_ecoflow_box(d, x, y, w, h, fonts, st):
     d.rectangle((x, y, x + w, y + h), outline=0, width=2)
     title = "EcoFlow Stream AC"
     title_w, title_h = _text_size(d, title, fonts['bold'])
-    title_x = x + int((w - title_w) / 2)
+    title_x = x + 10
     title_y = y + 4
     d.text((title_x, title_y), title, font=fonts['bold'], fill=0)
 
@@ -2158,25 +2189,29 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             mask_draw.polygon(polygon, fill=1)
 
     dark_pattern = _tile_pattern(_make_bayer_tile(0.9), img.size)
-    light_pattern = _tile_pattern(_make_bayer_tile(0.6), img.size)
+    pv_fill_gray = 130
+    pv_dither_strength = 0.5
 
     def panel(ts_list, val_list, pv_sum_list, cons_list, x0):
         n = len(ts_list)
         if n < 2: return
         xs = [x0 + i*(PW/(n-1)) for i in range(n)]
-        _draw_price_shadow(xs, val_list)
-        # Preis Stufenlinie
-        for i in range(n-1):
-            x1, y1 = xs[i],   _price_to_y(val_list[i])
-            x2, y2 = xs[i+1], _price_to_y(val_list[i+1])
-            d.line((x1,y1, x2,y1), fill=0, width=2)
-            d.line((x2,y1, x2,y2), fill=0, width=2)
         pv_points = None
         cons_points = None
         if has_pv and pv_sum_list is not None and n == len(pv_sum_list):
             pv_points = _series_to_points(_smooth_series(pv_sum_list), xs)
         if cons_list is not None and n == len(cons_list):
             cons_points = _series_to_points(_smooth_series(cons_list), xs)
+        if pv_points:
+            pv_layer = Image.new("L", img.size, 255)
+            pv_draw = ImageDraw.Draw(pv_layer)
+            for segment in _segments_from_points(pv_points):
+                smooth = _densify_points(segment, steps=4)
+                polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
+                pv_draw.polygon(polygon, fill=pv_fill_gray)
+            pv_mask = pv_layer.point(lambda p: 255 if p < 255 else 0)
+            pv_dither = _ordered_dither_bayer(pv_layer, matrix=_BAYER_8X8, strength=pv_dither_strength)
+            img.paste(pv_dither, (0, 0), pv_mask)
         if pv_points or cons_points:
             mask_pv = Image.new("1", img.size, 0)
             mask_cons = Image.new("1", img.size, 0)
@@ -2184,13 +2219,18 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
                 _draw_mask_from_points(ImageDraw.Draw(mask_pv), pv_points)
             if cons_points:
                 _draw_mask_from_points(ImageDraw.Draw(mask_cons), cons_points)
-            if pv_points:
-                img.paste(light_pattern, (0, 0), mask_pv)
             if cons_points:
                 img.paste(dark_pattern, (0, 0), mask_cons)
             if pv_points and cons_points:
                 pv_only = ImageChops.logical_and(mask_pv, ImageChops.invert(mask_cons))
                 img.paste(dark_pattern, (0, 0), pv_only)
+        _draw_price_shadow(xs, val_list)
+        # Preis Stufenlinie
+        for i in range(n-1):
+            x1, y1 = xs[i],   _price_to_y(val_list[i])
+            x2, y2 = xs[i+1], _price_to_y(val_list[i+1])
+            d.line((x1,y1, x2,y1), fill=0, width=2)
+            d.line((x2,y1, x2,y2), fill=0, width=2)
         # Min/Max Labels
         vmin_i, vmax_i = val_list.index(min(val_list)), val_list.index(max(val_list))
         for idx in (vmin_i, vmax_i):
