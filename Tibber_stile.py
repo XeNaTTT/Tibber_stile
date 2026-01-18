@@ -41,6 +41,16 @@ logging.basicConfig(level=logging.INFO)
 SUN_TODAY = None
 SUN_TOMORROW = None
 
+# Weather icon config
+WEATHER_ICON_DIR = "/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/Wettersymbole"
+WEATHER_ICON_WIDTH = 240
+WEATHER_ICON_HEIGHT = 235
+ICON_INVERT = False
+ICON_BITREVERSE = False
+_C_BITMAP_CACHE = {}
+_C_IMAGE_CACHE = {}
+_BIT_REVERSE_TABLE = bytes(int(f"{i:08b}"[::-1], 2) for i in range(256))
+
 # ---------- Utils ----------
 def _to_float(x):
     """Robuste Zahl-Konvertierung: akzeptiert int/float/Strings (inkl. Vorzeichen, Komma)."""
@@ -130,6 +140,58 @@ def pick(src, keys):
         except Exception:
             continue
     return res
+
+def load_c_bitmap(path, varname):
+    if path in _C_BITMAP_CACHE:
+        return _C_BITMAP_CACHE[path]
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+    except Exception as e:
+        raise RuntimeError(f"Icon-Datei nicht lesbar: {path}: {e}")
+    if varname not in content:
+        raise RuntimeError(f"Array {varname} nicht gefunden in {path}")
+    bytes_list = [int(b, 16) for b in re.findall(r"0x[0-9A-Fa-f]{2}", content)]
+    if not bytes_list:
+        raise RuntimeError(f"Keine Icon-Daten gefunden in {path}")
+    data = bytes(bytes_list)
+    _C_BITMAP_CACHE[path] = data
+    return data
+
+def c_bitmap_to_image(data, w, h, invert=False, bitreverse=False):
+    if bitreverse:
+        data = data.translate(_BIT_REVERSE_TABLE)
+    img = Image.frombytes("1", (w, h), data)
+    if invert:
+        img = ImageChops.invert(img)
+    return img
+
+def get_weather_icon_from_bucket(bucket, is_day):
+    bucket = bucket or "cloudy"
+    if bucket == "clear":
+        return "sun.c"
+    if bucket in ("partly", "cloudy", "overcast", "fog"):
+        return "cloud.c"
+    if bucket in ("rain", "drizzle", "thunder"):
+        return "rain.c"
+    if bucket == "snow":
+        return "cloud.c"
+    return "cloud.c"
+
+def _get_weather_icon_image(bucket, is_day, invert=False, bitreverse=False):
+    filename = get_weather_icon_from_bucket(bucket, is_day)
+    if not filename:
+        return None
+    path = os.path.join(WEATHER_ICON_DIR, filename)
+    varname = f"gImage_{os.path.splitext(filename)[0]}"
+    cache_key = (path, invert, bitreverse)
+    if cache_key in _C_IMAGE_CACHE:
+        return _C_IMAGE_CACHE[cache_key]
+    data = load_c_bitmap(path, varname)
+    img = c_bitmap_to_image(data, WEATHER_ICON_WIDTH, WEATHER_ICON_HEIGHT,
+                            invert=invert, bitreverse=bitreverse)
+    _C_IMAGE_CACHE[cache_key] = img
+    return img
 
 # ---------- Tibber ----------
 def pick_home_with_data(homes):
@@ -1813,7 +1875,7 @@ def draw_weather_icon(draw, x, y, size, code, is_day, fill=0):
         draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
 
 
-def draw_weather_box(d, x, y, w, h, fonts, hourly_map, sun_today_h=None, sun_tomorrow_h=None):
+def draw_weather_box(d, img, x, y, w, h, fonts, hourly_map, sun_today_h=None, sun_tomorrow_h=None):
     d.rectangle((x, y, x + w, y + h), outline=0, width=2)
     icon_size = 40
     icon_x = x + 10
@@ -1822,7 +1884,21 @@ def draw_weather_box(d, x, y, w, h, fonts, hourly_map, sun_today_h=None, sun_tom
     now = dt.datetime.now(LOCAL_TZ)
     hour = now.replace(minute=0, second=0, microsecond=0)
     code, is_day = hourly_map.get(hour, (None, None))
+    icon = None
     if code is not None:
+        try:
+            icon = _get_weather_icon_image(
+                meteo_bucket(code),
+                is_day,
+                invert=ICON_INVERT,
+                bitreverse=ICON_BITREVERSE,
+            )
+        except Exception as e:
+            logging.warning("Weather-Icon laden fehlgeschlagen: %s", e)
+    if icon is not None:
+        icon = icon.resize((icon_size, icon_size), resample=Image.NEAREST)
+        img.paste(icon, (icon_x, icon_y))
+    elif code is not None:
         draw_weather_icon(d, icon_x, icon_y, icon_size, code, is_day, fill=0)
     else:
         draw_weather_icon(d, icon_x, icon_y, icon_size, 3, True, fill=0)
@@ -2359,6 +2435,7 @@ def main():
     box_w  = (w - margin*3)//2
     draw_weather_box(
         d,
+        img,
         margin,
         margin,
         box_w,
