@@ -171,12 +171,12 @@ def get_weather_icon_from_bucket(bucket, is_day):
     if bucket == "clear":
         return "sun.c"
     if bucket in ("partly", "cloudy", "overcast", "fog"):
-        return "cloud.c"
+        return "cloudy.c"
     if bucket in ("rain", "drizzle", "thunder"):
         return "rain.c"
     if bucket == "snow":
-        return "cloud.c"
-    return "cloud.c"
+        return "cloudy.c"
+    return "cloudy.c"
 
 def _get_weather_icon_image(bucket, is_day, invert=False, bitreverse=False):
     filename = get_weather_icon_from_bucket(bucket, is_day)
