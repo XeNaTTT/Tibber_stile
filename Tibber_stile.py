@@ -6,6 +6,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageChops
 import pandas as pd, numpy as np
 from urllib.parse import urlencode
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 ECO_DEBUG = bool(int(os.getenv("ECO_DEBUG", "0")))
 PV_PAT = re.compile(r"(pv|solar|yield|gen|power|input|watt|energy)", re.I)
@@ -2327,33 +2328,63 @@ def main():
     epd.init(); epd.Clear()
     w, h = epd.width, epd.height
 
-    # Daten laden, robust gegen API-Ausfall
-    tibber_source = "api"
-    try:
-        pi = tibber_priceinfo()
-        update_price_cache(pi)
-    except Exception as e:
-        tibber_source = "cache"
-        logging.error("Nutze Cache wegen Fehler: %s", e)
-        today_cache = load_cache(CACHE_TODAY) or {"data": []}
-        yesterday_cache = load_cache(CACHE_YESTERDAY) or {"data": []}
-        pi = {
-            'today': today_cache.get('data', []),
-            'tomorrow': [],
-            'current': {'startsAt': dt.datetime.now(LOCAL_TZ).isoformat(),
-                        'total': (today_cache.get('data',[{'total':0}])[0].get('total', 0) or 0)}
-        }
-        logging.info(
-            "Tibber Preisinfo aus Cache: heute=%d (Datei), morgen=0, current=%s",
-            len(pi.get('today', []) or []),
-            pi.get('current', {}).get('startsAt', '-')
+    def _future_result(fut, default, error_msg):
+        try:
+            return fut.result()
+        except Exception as e:
+            logging.error(error_msg, e)
+            return default
+
+    # Daten parallel vorab laden (API + DB), Display-Update erst am Ende.
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        fut_pi = executor.submit(tibber_priceinfo)
+        fut_quarter = executor.submit(tibber_priceinfo_quarter_range)
+        fut_hourly = executor.submit(tibber_hourly_consumption, last=48)
+        fut_weather = executor.submit(fetch_openmeteo_hourly, api_key.LAT, api_key.LON)
+        fut_sun = executor.submit(fetch_openmeteo_sunshine_hours, api_key.LAT, api_key.LON)
+        fut_eco = executor.submit(ecoflow_status_bkw)
+
+        # Daten laden, robust gegen API-Ausfall
+        tibber_source = "api"
+        pi = _future_result(fut_pi, None, "Tibber Preisinfo fehlgeschlagen: %s")
+        if pi:
+            update_price_cache(pi)
+        else:
+            tibber_source = "cache"
+            today_cache = load_cache(CACHE_TODAY) or {"data": []}
+            yesterday_cache = load_cache(CACHE_YESTERDAY) or {"data": []}
+            pi = {
+                'today': today_cache.get('data', []),
+                'tomorrow': [],
+                'current': {'startsAt': dt.datetime.now(LOCAL_TZ).isoformat(),
+                            'total': (today_cache.get('data',[{'total':0}])[0].get('total', 0) or 0)}
+            }
+            logging.info(
+                "Tibber Preisinfo aus Cache: heute=%d (Datei), morgen=0, current=%s",
+                len(pi.get('today', []) or []),
+                pi.get('current', {}).get('startsAt', '-')
+            )
+
+        quarter_range = _future_result(
+            fut_quarter, None, "15-Minuten-Preise konnten nicht geladen werden: %s"
         )
 
-    quarter_range = None
-    try:
-        quarter_range = tibber_priceinfo_quarter_range()
-    except Exception as e:
-        logging.error("15-Minuten-Preise konnten nicht geladen werden: %s", e)
+        # EcoFlow-Status früh laden (robust) – damit eco immer definiert ist
+        eco = _future_result(fut_eco, {}, "EcoFlow Status fehlgeschlagen: %s")
+        if eco and ECO_DEBUG:
+            logging.info(
+                "EcoFlow Live-Status: PV=%s W, Grid=%s W, Load=%s W, SoC=%s%%",
+                eco.get('pv_input_w_sum') or eco.get('powGetPvSum'),
+                eco.get('grid_w'),
+                eco.get('load_w'),
+                eco.get('soc')
+            )
+
+        hourly = _future_result(fut_hourly, [], "Tibber Verbrauchsdaten fehlgeschlagen: %s")
+        hourly_map = _future_result(fut_weather, {}, "Wetterdaten konnten nicht geladen werden: %s")
+        sun_today_h, sun_tomorrow_h = _future_result(
+            fut_sun, (None, None), "Sonnenstunden konnten nicht geladen werden: %s"
+        )
 
     tomorrow = pi.get("tomorrow", [])
     if tomorrow:
@@ -2397,33 +2428,11 @@ def main():
     current_price = pick_current_price(quarter_range, pi)
     info = prepare_info(today_slots, current_price)
     
-# EcoFlow-Status früh laden (robust) – damit eco immer definiert ist
-    eco = {}
-    try:
-        eco = ecoflow_status_bkw()  # liefert dict mit u.a. pv_input_w_sum, powGetPvSum, powGetSysGrid, powGetSysLoad, power_w, cmsBattSoc
-        if ECO_DEBUG:
-            logging.info(
-                "EcoFlow Live-Status: PV=%s W, Grid=%s W, Load=%s W, SoC=%s%%",
-                eco.get('pv_input_w_sum') or eco.get('powGetPvSum'),
-                eco.get('grid_w'),
-                eco.get('load_w'),
-                eco.get('soc')
-            )
-    except Exception as e:
-        logging.error(f"EcoFlow Status fehlgeschlagen: {e}")
-        eco = {}
-
     tl_dt, _ = slots_to_15min(left)
     tr_dt, _ = slots_to_15min(right)
 
     pv_db_stats(tl_dt, labels[0])
     pv_db_stats(tr_dt, labels[1])
-
-    try:
-        hourly = tibber_hourly_consumption(last=48)
-    except Exception as e:
-        logging.error("Tibber Verbrauchsdaten fehlgeschlagen: %s", e)
-        hourly = []
     if hourly:
         logging.info(
             "Tibber Verbrauchsdaten via API: letzte %d Stunden, Start=%s, Ende=%s",
@@ -2436,8 +2445,6 @@ def main():
     cons_left = upsample_hourly_to_quarter(tl_dt, hourly)
     cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
 
-    hourly_map = fetch_openmeteo_hourly(api_key.LAT, api_key.LON)
-    sun_today_h, sun_tomorrow_h = fetch_openmeteo_sunshine_hours(api_key.LAT, api_key.LON)
     logging.info(
         "Wetterdaten via Open-Meteo (lat=%.4f, lon=%.4f): hourly entries=%d",
         api_key.LAT, api_key.LON, len(hourly_map)
