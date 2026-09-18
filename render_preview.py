@@ -82,7 +82,7 @@ def draw_chart_mock(draw, x0, y0, x1, y1, font_tiny):
         poly = points + [(points[-1][0], y1), (points[0][0], y1)]
         draw.polygon(poly, fill=220)
 
-        # fake consumption (darker)
+        # fake consumption (3 px line, matching the real chart)
         points2 = []
         for i in range(0, 49):
             t = i / 48.0
@@ -90,8 +90,7 @@ def draw_chart_mock(draw, x0, y0, x1, y1, font_tiny):
             cons = 0.25 + 0.10*math.sin(6*t*math.pi)
             yy = y1 - int(cons * h)
             points2.append((xx, yy))
-        poly2 = points2 + [(points2[-1][0], y1), (points2[0][0], y1)]
-        draw.polygon(poly2, fill=200)
+        draw.line(points2, fill=20, width=3)
 
         # step price line
         lasty = None
