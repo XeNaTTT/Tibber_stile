@@ -2190,13 +2190,6 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
         dense.append(points[-1])
         return dense
 
-    def _draw_mask_from_points(mask_draw, series_points):
-        for segment in _segments_from_points(series_points):
-            smooth = _densify_points(segment, steps=4)
-            polygon = smooth + [(smooth[-1][0], Y1), (smooth[0][0], Y1)]
-            mask_draw.polygon(polygon, fill=1)
-
-    dark_pattern = _tile_pattern(_make_bayer_tile(0.9), img.size)
     pv_fill_gray = 200
     pv_dither_strength = 0.3
 
@@ -2210,18 +2203,6 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             pv_points = _series_to_points(_smooth_series(pv_sum_list), xs)
         if cons_list is not None and n == len(cons_list):
             cons_points = _series_to_points(_smooth_series(cons_list), xs)
-        if pv_points or cons_points:
-            mask_pv = Image.new("1", img.size, 0)
-            mask_cons = Image.new("1", img.size, 0)
-            if pv_points:
-                _draw_mask_from_points(ImageDraw.Draw(mask_pv), pv_points)
-            if cons_points:
-                _draw_mask_from_points(ImageDraw.Draw(mask_cons), cons_points)
-            if cons_points:
-                img.paste(dark_pattern, (0, 0), mask_cons)
-            if pv_points and cons_points:
-                pv_only = ImageChops.logical_and(mask_pv, ImageChops.invert(mask_cons))
-                img.paste(dark_pattern, (0, 0), pv_only)
         if pv_points:
             pv_layer = Image.new("L", img.size, 255)
             pv_draw = ImageDraw.Draw(pv_layer)
@@ -2232,6 +2213,11 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             pv_mask = pv_layer.point(lambda p: 255 if p < 255 else 0)
             pv_dither = _ordered_dither_bayer(pv_layer, matrix=_BAYER_8X8, strength=pv_dither_strength)
             img.paste(pv_dither, (0, 0), pv_mask)
+        # Verbrauch als gut sichtbare Kurve statt als gefuellte Flaeche.
+        if cons_points:
+            for segment in _segments_from_points(cons_points):
+                smooth = _densify_points(segment, steps=4)
+                d.line(smooth, fill=0, width=3)
         _draw_price_shadow(xs, val_list)
         # Preis Stufenlinie
         for i in range(n-1):
@@ -2269,7 +2255,7 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
     legend_y = Y0 - 18
     legend_x = X1 - 320
     cursor = legend_x
-    for label, density in (("PV", 0.6), ("Verbrauch", 0.9), ("PV>Verbrauch", 0.9)):
+    for label, density in (("PV", 0.6),):
         d.text((cursor, legend_y), label, font=fonts['tiny'], fill=0)
         label_w, _ = _text_size(d, label, fonts['tiny'])
         box_x = cursor + label_w + 4
@@ -2280,6 +2266,12 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             density=density,
         )
         cursor = box_x + 18
+    label = "Verbrauch"
+    d.text((cursor, legend_y), label, font=fonts['tiny'], fill=0)
+    label_w, _ = _text_size(d, label, fonts['tiny'])
+    line_x = cursor + label_w + 4
+    d.line((line_x, legend_y + 7, line_x + 12, legend_y + 7), fill=0, width=3)
+    cursor = line_x + 18
     d.text((cursor, legend_y), "Preis", font=fonts['tiny'], fill=0)
     if not has_pv:
         d.text((X0 + 6, Y0 + 6), "PV DB leer - keine PV-Linien", font=fonts['tiny'], fill=0)
