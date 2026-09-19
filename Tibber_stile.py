@@ -7,6 +7,7 @@ import pandas as pd, numpy as np
 from urllib.parse import urlencode
 import re
 from concurrent.futures import ThreadPoolExecutor
+from energy_chart_utils import format_power_peak, price_slots_to_quarters
 
 ECO_DEBUG = bool(int(os.getenv("ECO_DEBUG", "0")))
 PV_PAT = re.compile(r"(pv|solar|yield|gen|power|input|watt|energy)", re.I)
@@ -413,43 +414,9 @@ def prepare_info(today_slots, current):
     }
 
 # ---------- 15-Min Transformation ----------
-def expand_to_15min(slots):
-    ts_list, val_list = [], []
-    for s in slots:
-        start = dt.datetime.fromisoformat(s['startsAt']).astimezone(LOCAL_TZ)
-        price = s['total']*100
-        for k in range(4):
-            ts_list.append(start + dt.timedelta(minutes=15*k))
-            val_list.append(price)
-    return ts_list, val_list
-
-
 def slots_to_15min(slots):
-    """
-    Nutzt echte 15-Minuten-Slots, sofern die Tibber-Antwort diese liefert.
-    Andernfalls wird wie bisher jede Stunde auf vier 15-Minuten-Segmente
-    erweitert.
-    """
-    parsed = []
-    for s in sorted(slots, key=lambda x: x.get("startsAt", "")):
-        try:
-            start = dt.datetime.fromisoformat(s["startsAt"]).astimezone(LOCAL_TZ)
-            price = s["total"] * 100
-            parsed.append((start, price))
-        except Exception:
-            continue
-
-    if len(parsed) >= 2:
-        deltas_min = [
-            (parsed[i + 1][0] - parsed[i][0]).total_seconds() / 60.0
-            for i in range(len(parsed) - 1)
-        ]
-        if min(deltas_min) <= 16:  # bereits 15-Minuten-Auflösung
-            ts_list = [p[0] for p in parsed]
-            val_list = [p[1] for p in parsed]
-            return ts_list, val_list
-
-    return expand_to_15min(slots)
+    """Normalize hourly or quarter-hourly Tibber prices to 15-minute slots."""
+    return price_slots_to_quarters(slots, LOCAL_TZ)
 
 def normalize_price_slots_15min(slots):
     if not slots:
@@ -2071,6 +2038,7 @@ def draw_info_box(d, info, fonts, y, width):
         ty = y - label_h / 2
         d.text((tx, ty), label, font=fonts['bold'], fill=0)
 
+
 def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
                        pv_left=None, pv_right=None,
                        cons_left=None, cons_right=None,
@@ -2159,7 +2127,7 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             if pd.isna(series.iloc[i]):
                 points.append(None)
                 continue
-            val = max(0.0, min(float(series.iloc[i]), 600.0))
+            val = max(0.0, float(series.iloc[i]))
             y = Y1 - val * sy_power
             points.append((x, y))
         return points
@@ -2225,6 +2193,30 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             x2, y2 = xs[i+1], _price_to_y(val_list[i+1])
             d.line((x1,y1, x2,y1), fill=0, width=2)
             d.line((x2,y1, x2,y2), fill=0, width=2)
+        # Mark the highest measured consumption in each day panel.  The raw
+        # value is used, rather than the visually smoothed curve, so the label
+        # remains an accurate reading.
+        if cons_points and _series_has_values(cons_list):
+            peak_index = int(np.nanargmax(np.asarray(cons_list, dtype=float)))
+            peak_watts = float(cons_list.iloc[peak_index])
+            if peak_watts > 0 and cons_points[peak_index] is not None:
+                peak_x, peak_y = cons_points[peak_index]
+                radius = 5
+                d.ellipse(
+                    (peak_x - radius, peak_y - radius, peak_x + radius, peak_y + radius),
+                    fill=255, outline=0, width=2,
+                )
+                peak_label = f"Peak {format_power_peak(peak_watts)}"
+                label_w, label_h = _text_size(d, peak_label, fonts['tiny'])
+                label_x = max(x0 + 2, min(peak_x - label_w / 2, x0 + PW - label_w - 2))
+                label_y = peak_y - label_h - radius - 3
+                if label_y < Y0 + 2:
+                    label_y = peak_y + radius + 3
+                d.rectangle(
+                    (label_x - 2, label_y - 1, label_x + label_w + 2, label_y + label_h + 1),
+                    fill=255,
+                )
+                d.text((label_x, label_y), peak_label, font=fonts['tiny'], fill=0)
         # Min/Max Labels
         vmin_i, vmax_i = val_list.index(min(val_list)), val_list.index(max(val_list))
         for idx in (vmin_i, vmax_i):
