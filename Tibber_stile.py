@@ -838,55 +838,118 @@ def tibber_consumption():
     return {"resolution": "hourly", "nodes": _tibber_consumption_request("HOURLY", 48)}
 
 # ---------- Wetter ----------
-def fetch_openmeteo_forecast(lat, lon):
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+WEATHER_MODELS = (
+    ("icon_d2", "ICON-D2"),
+    ("icon_eu", "ICON-EU (fallback)"),
+)
+
+
+def _required_weather_times(today):
+    """Return every hourly timestamp needed by the two dashboard days."""
+    start = dt.datetime.combine(today, dt.time(6), tzinfo=LOCAL_TZ)
+    end = dt.datetime.combine(today + dt.timedelta(days=2), dt.time(6),
+                              tzinfo=LOCAL_TZ)
+    required = set()
+    current = start
+    while current < end:
+        required.add(current)
+        current += dt.timedelta(hours=1)
+    return required
+
+
+def _parse_openmeteo_response(payload):
+    hourly = payload.get("hourly", {}) or {}
+    columns = (
+        hourly.get("time") or [],
+        hourly.get("temperature_2m") or [],
+        hourly.get("precipitation_probability") or [],
+        hourly.get("weather_code") or hourly.get("weathercode") or [],
+        hourly.get("is_day") or [],
+    )
+    hourly_map = {}
+    for t_str, temperature, rain, code, is_day in zip(*columns):
+        try:
+            timestamp = dt.datetime.fromisoformat(t_str)
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=LOCAL_TZ)
+            else:
+                timestamp = timestamp.astimezone(LOCAL_TZ)
+            hourly_map[timestamp] = {
+                "temperature": _as_float_or_none(temperature),
+                "precipitation_probability": _as_float_or_none(rain),
+                "code": int(code),
+                "is_day": bool(is_day),
+            }
+        except (TypeError, ValueError):
+            continue
+
+    daily = payload.get("daily", {}) or {}
+    sunshine_by_date = {}
+    for date_string, seconds in zip(
+            daily.get("time") or [], daily.get("sunshine_duration") or []):
+        try:
+            value = _as_float_or_none(seconds)
+            sunshine_by_date[dt.date.fromisoformat(date_string)] = (
+                value / 3600.0 if value is not None else None
+            )
+        except (TypeError, ValueError):
+            continue
+    return hourly_map, sunshine_by_date
+
+
+def _fetch_openmeteo_model(lat, lon, model, today):
+    response = requests.get(
+        OPEN_METEO_FORECAST_URL,
+        params={
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "temperature_2m,precipitation_probability,weather_code,is_day",
+            "daily": "sunshine_duration",
+            "forecast_days": 3,
+            "timezone": "Europe/Berlin",
+            "models": model,
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
+    hourly_map, sunshine_by_date = _parse_openmeteo_response(response.json())
+    required = _required_weather_times(today)
+    missing = required.difference(hourly_map)
+    incomplete = {
+        timestamp for timestamp in required.intersection(hourly_map)
+        if any(hourly_map[timestamp].get(field) is None
+               for field in ("temperature", "precipitation_probability", "code"))
+    }
+    sunshine = tuple(sunshine_by_date.get(today + dt.timedelta(days=offset))
+                     for offset in (0, 1))
+    if missing or incomplete or any(value is None for value in sunshine):
+        raise ValueError(
+            "%s forecast incomplete: %d hourly values missing, %d incomplete, "
+            "and %d sunshine totals missing"
+            % (model, len(missing), len(incomplete),
+               sum(value is None for value in sunshine))
+        )
+    return hourly_map, sunshine
+
+
+def fetch_openmeteo_forecast(lat, lon, include_model=False):
     """
     Fetch the three-day hourly forecast and two daily sunshine totals.
 
     Three forecast days are intentional: tomorrow's night ends at 06:00 on
     the day after tomorrow.
     """
-    try:
-        url = (
-            "https://api.open-meteo.com/v1/forecast"
-            f"?latitude={lat}&longitude={lon}"
-            "&hourly=temperature_2m,precipitation_probability,weather_code,is_day"
-            "&daily=sunshine_duration&forecast_days=3"
-            "&timezone=Europe%2FBerlin"
-        )
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        j = r.json()
-        hourly = j.get("hourly", {}) or {}
-        times = hourly.get("time") or []
-        temperatures = hourly.get("temperature_2m") or []
-        precipitation = hourly.get("precipitation_probability") or []
-        codes = hourly.get("weather_code") or hourly.get("weathercode") or []
-        is_day_list = hourly.get("is_day") or []
-        hourly_map = {}
-        for t_str, temperature, rain, code, is_day in zip(
-                times, temperatures, precipitation, codes, is_day_list):
-            try:
-                t = dt.datetime.fromisoformat(t_str)
-                if t.tzinfo is None:
-                    t = t.replace(tzinfo=LOCAL_TZ)
-                hourly_map[t] = {
-                    "temperature": _as_float_or_none(temperature),
-                    "precipitation_probability": _as_float_or_none(rain),
-                    "code": int(code),
-                    "is_day": bool(is_day),
-                }
-            except Exception:
-                continue
-        sunshine = (j.get("daily") or {}).get("sunshine_duration") or []
-        sun_hours = [(_as_float_or_none(value) / 3600.0)
-                     if _as_float_or_none(value) is not None else None
-                     for value in sunshine[:2]]
-        while len(sun_hours) < 2:
-            sun_hours.append(None)
-        return hourly_map, tuple(sun_hours)
-    except Exception as e:
-        logging.error("Open-Meteo hourly fetch failed: %s", e)
-        return {}, (None, None)
+    today = dt.datetime.now(LOCAL_TZ).date()
+    for model, display_name in WEATHER_MODELS:
+        try:
+            hourly_map, sunshine = _fetch_openmeteo_model(lat, lon, model, today)
+            result = (hourly_map, sunshine, display_name)
+            return result if include_model else result[:2]
+        except Exception as error:
+            logging.warning("Open-Meteo model %s unavailable: %s", model, error)
+    result = ({}, (None, None), None)
+    return result if include_model else result[:2]
 
 
 def fetch_openmeteo_hourly(lat, lon):
@@ -898,26 +961,7 @@ def fetch_openmeteo_sunshine_hours(lat, lon):
     Holt Open-Meteo daily sunshine_duration (Sekunden) für heute und morgen.
     Return: (sun_today_h, sun_tomorrow_h) in Stunden oder (None, None)
     """
-    try:
-        url = (
-            "https://api.open-meteo.com/v1/forecast"
-            f"?latitude={lat}&longitude={lon}"
-            "&daily=sunshine_duration"
-            "&timezone=Europe%2FBerlin"
-        )
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        j = r.json()
-        daily = j.get("daily", {}) or {}
-        arr = daily.get("sunshine_duration") or []
-        if len(arr) < 2:
-            raise ValueError("sunshine_duration missing or incomplete")
-        sun_today_h = float(arr[0]) / 3600.0
-        sun_tomorrow_h = float(arr[1]) / 3600.0
-        return sun_today_h, sun_tomorrow_h
-    except Exception as e:
-        logging.error("Open-Meteo sunshine fetch failed: %s", e)
-        return None, None
+    return fetch_openmeteo_forecast(lat, lon)[1]
 
 
 WEATHER_PERIODS = (
@@ -2454,6 +2498,7 @@ def main():
         fut_weather = executor.submit(
             fetch_openmeteo_forecast,
             getattr(api_key, "LAT", 0), getattr(api_key, "LON", 0),
+            True,
         )
 
         # Daten laden, robust gegen API-Ausfall
@@ -2486,8 +2531,9 @@ def main():
             {"resolution": "hourly", "nodes": []},
             "Tibber Verbrauchsdaten fehlgeschlagen: %s",
         )
-        hourly_map, sunshine = _future_result(
-            fut_weather, ({}, (None, None)), "Wetterdaten konnten nicht geladen werden: %s"
+        hourly_map, sunshine, weather_model = _future_result(
+            fut_weather, ({}, (None, None), None),
+            "Wetterdaten konnten nicht geladen werden: %s"
         )
         sun_today_h, sun_tomorrow_h = sunshine
 
@@ -2596,6 +2642,8 @@ def main():
         "Wetterdaten via Open-Meteo (lat=%.4f, lon=%.4f): hourly entries=%d",
         api_key.LAT, api_key.LON, len(hourly_map)
     )
+    if weather_model:
+        logging.info("Weather model: %s", weather_model)
     if sun_today_h is not None or sun_tomorrow_h is not None:
         logging.info(
             "Sonnenstunden: heute=%s h, morgen=%s h",
