@@ -7,7 +7,14 @@ import pandas as pd, numpy as np
 from urllib.parse import urlencode
 import re
 from concurrent.futures import ThreadPoolExecutor
-from energy_chart_utils import format_power_peak, price_slots_to_quarters
+from energy_chart_utils import (
+    QUARTER_SLOTS_PER_DAY,
+    consumption_to_quarter_series,
+    format_power_peak,
+    price_slots_to_quarters,
+    quarter_slot_index,
+    x_for_quarter_slot,
+)
 
 ECO_DEBUG = bool(int(os.getenv("ECO_DEBUG", "0")))
 PV_PAT = re.compile(r"(pv|solar|yield|gen|power|input|watt|energy)", re.I)
@@ -781,12 +788,12 @@ def get_pv_series_multi_micro(slots_dt):
 
     return pv1, pv2, pv_sum
 
-# ---------- Tibber Consumption (hourly -> 15min) ----------
-def tibber_hourly_consumption(last=48):
+# ---------- Tibber Consumption ----------
+def _tibber_consumption_request(resolution, last):
     hdr = {"Authorization": f"Bearer {api_key.API_KEY}", "Content-Type": "application/json"}
     q = f"""
     {{ viewer {{ homes {{
-      consumption(resolution: HOURLY, last: {last}) {{
+      consumption(resolution: {resolution}, last: {last}) {{
         nodes {{ from consumption }}
       }}
     }}}} }}
@@ -794,6 +801,8 @@ def tibber_hourly_consumption(last=48):
     r = requests.post("https://api.tibber.com/v1-beta/gql", json={"query": q}, headers=hdr, timeout=15)
     r.raise_for_status()
     j = r.json()
+    if j.get("errors"):
+        raise RuntimeError(j["errors"][0].get("message", "Tibber GraphQL error"))
     homes = (((j.get("data") or {}).get("viewer") or {}).get("homes") or [])
     home = pick_home_with_data(homes) or {}
     cons = (home.get("consumption") or {})
@@ -801,28 +810,22 @@ def tibber_hourly_consumption(last=48):
     if not nodes:
         logging.info("Tibber Consumption leer/fehlend: homes=%d", len(homes))
         return []
-    out = []
-    for n in nodes:
-        f = dt.datetime.fromisoformat(n["from"]).astimezone(LOCAL_TZ)
-        out.append((f, float(n["consumption"] or 0.0)))
-    return out
+    return nodes
 
-def upsample_hourly_to_quarter(ts_15min, hourly_list):
-    import bisect
-    if not hourly_list:
-        return pd.Series([0.0]*len(ts_15min))
-    hours = [t for (t,_) in hourly_list]
-    vals  = [v for (_,v) in hourly_list]  # kWh je Stunde
-    first_ts, last_ts = hours[0], hours[-1]
-    out = []
-    for t in ts_15min:
-        if t < first_ts or t > last_ts:
-            out.append(0.0)
-            continue
-        i = bisect.bisect_right(hours, t) - 1
-        kwh = (vals[i] if i >= 0 else 0.0)
-        out.append(kwh * 1000.0)  # W pro 15-Minuten-Slot (vereinfachtes Profil)
-    return pd.Series(out)
+
+def tibber_consumption():
+    """Use real quarter-hour consumption when supported, otherwise hourly.
+
+    QUARTER_HOURLY is feature/market dependent in Tibber's API, so an API
+    rejection is handled explicitly rather than manufacturing quarter values.
+    """
+    try:
+        nodes = _tibber_consumption_request("QUARTER_HOURLY", 192)
+        if nodes:
+            return {"resolution": "15min", "nodes": nodes}
+    except Exception as exc:
+        logging.info("15-Minuten-Verbrauch nicht verfügbar, nutze Stundenwerte: %s", exc)
+    return {"resolution": "hourly", "nodes": _tibber_consumption_request("HOURLY", 48)}
 
 # ---------- Wetter ----------
 def fetch_openmeteo_hourly(lat, lon):
@@ -2064,10 +2067,11 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
     def vmax_power(series):
         if series is None: return 0
         try:
-            if len(series) == 0:
+            finite = [float(value) for value in series
+                      if value is not None and math.isfinite(float(value))]
+            if not finite:
                 return 0
-            val = float(np.nanmax(series))
-            return val if math.isfinite(val) else 0
+            return max(finite)
         except: return 0
     pv_left = pv_left or {}
     pv_right = pv_right or {}
@@ -2087,7 +2091,7 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
         if series is None:
             return False
         try:
-            return np.isfinite(series).any()
+            return any(value is not None and math.isfinite(float(value)) for value in series)
         except Exception:
             return False
 
@@ -2124,10 +2128,11 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
     def _series_to_points(series, xs):
         points = []
         for i, x in enumerate(xs):
-            if pd.isna(series.iloc[i]):
+            value = series.iloc[i] if hasattr(series, "iloc") else series[i]
+            if value is None or pd.isna(value):
                 points.append(None)
                 continue
-            val = max(0.0, float(series.iloc[i]))
+            val = max(0.0, float(value))
             y = Y1 - val * sy_power
             points.append((x, y))
         return points
@@ -2164,13 +2169,16 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
     def panel(ts_list, val_list, pv_sum_list, cons_list, x0):
         n = len(ts_list)
         if n < 2: return
-        xs = [x0 + i*(PW/(n-1)) for i in range(n)]
+        xs = [x_for_quarter_slot(x0, PW, quarter_slot_index(timestamp))
+              for timestamp in ts_list]
         pv_points = None
         cons_points = None
         if has_pv and pv_sum_list is not None and n == len(pv_sum_list):
             pv_points = _series_to_points(_smooth_series(pv_sum_list), xs)
-        if cons_list is not None and n == len(cons_list):
-            cons_points = _series_to_points(_smooth_series(cons_list), xs)
+        if cons_list is not None and len(cons_list) == QUARTER_SLOTS_PER_DAY:
+            cons_xs = [x_for_quarter_slot(x0, PW, slot)
+                       for slot in range(QUARTER_SLOTS_PER_DAY)]
+            cons_points = _series_to_points(cons_list, cons_xs)
         if pv_points:
             pv_layer = Image.new("L", img.size, 255)
             pv_draw = ImageDraw.Draw(pv_layer)
@@ -2183,40 +2191,54 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             img.paste(pv_dither, (0, 0), pv_mask)
         # Verbrauch als gut sichtbare Kurve statt als gefuellte Flaeche.
         if cons_points:
-            for segment in _segments_from_points(cons_points):
-                smooth = _densify_points(segment, steps=4)
+            # Missing quarters in an hourly response are connected only for
+            # presentation; they do not become invented measured values.
+            measured_points = [point for point in cons_points if point is not None]
+            if len(measured_points) > 1:
+                smooth = _densify_points(measured_points, steps=4)
                 d.line(smooth, fill=0, width=3)
         _draw_price_shadow(xs, val_list)
         # Preis Stufenlinie
-        for i in range(n-1):
+        for i in range(n):
             x1, y1 = xs[i],   _price_to_y(val_list[i])
-            x2, y2 = xs[i+1], _price_to_y(val_list[i+1])
+            next_slot = quarter_slot_index(ts_list[i]) + 1
+            x2 = x_for_quarter_slot(x0, PW, next_slot)
             d.line((x1,y1, x2,y1), fill=0, width=2)
-            d.line((x2,y1, x2,y2), fill=0, width=2)
+            if i + 1 < n:
+                y2 = _price_to_y(val_list[i+1])
+                d.line((x2,y1, x2,y2), fill=0, width=2)
         # Mark the highest measured consumption in each day panel.  The raw
         # value is used, rather than the visually smoothed curve, so the label
         # remains an accurate reading.
         if cons_points and _series_has_values(cons_list):
             peak_index = int(np.nanargmax(np.asarray(cons_list, dtype=float)))
-            peak_watts = float(cons_list.iloc[peak_index])
-            if peak_watts > 0 and cons_points[peak_index] is not None:
+            peak_watts = float(cons_list.iloc[peak_index] if hasattr(cons_list, "iloc")
+                               else cons_list[peak_index])
+            if cons_points[peak_index] is not None:
                 peak_x, peak_y = cons_points[peak_index]
                 radius = 5
-                d.ellipse(
-                    (peak_x - radius, peak_y - radius, peak_x + radius, peak_y + radius),
-                    fill=255, outline=0, width=2,
-                )
                 peak_label = f"Peak {format_power_peak(peak_watts)}"
                 label_w, label_h = _text_size(d, peak_label, fonts['tiny'])
                 label_x = max(x0 + 2, min(peak_x - label_w / 2, x0 + PW - label_w - 2))
                 label_y = peak_y - label_h - radius - 3
                 if label_y < Y0 + 2:
                     label_y = peak_y + radius + 3
+                leader_x = max(label_x, min(peak_x, label_x + label_w))
+                leader_y = label_y if label_y > peak_y else label_y + label_h
+                d.line((peak_x, peak_y, leader_x, leader_y), fill=0, width=1)
                 d.rectangle(
                     (label_x - 2, label_y - 1, label_x + label_w + 2, label_y + label_h + 1),
                     fill=255,
                 )
                 d.text((label_x, label_y), peak_label, font=fonts['tiny'], fill=0)
+                d.ellipse(
+                    (peak_x - radius, peak_y - radius, peak_x + radius, peak_y + radius),
+                    fill=255, outline=0, width=2,
+                )
+                logging.info(
+                    "Peak rendering: slot=%d, value=%.1f W, peak_x=%.2f, peak_y=%.2f",
+                    peak_index, peak_watts, peak_x, peak_y,
+                )
         # Min/Max Labels
         vmin_i, vmax_i = val_list.index(min(val_list)), val_list.index(max(val_list))
         for idx in (vmin_i, vmax_i):
@@ -2234,12 +2256,11 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
     # Stundenbeschriftung
     def hour_ticks(ts_list, x0):
         if len(ts_list) < 2: return
-        n = len(ts_list)
-        xs = [x0 + i*(PW/(n-1)) for i in range(n)]
-        for i,t in enumerate(ts_list):
-            if t.minute == 0:
-                d.line((xs[i], Y1, xs[i], Y1+4), fill=0, width=1)
-                d.text((xs[i]-8, Y1+6), t.strftime("%H"), font=fonts['tiny'], fill=0)
+        for hour in range(24):
+            slot = hour * 4
+            x = x_for_quarter_slot(x0, PW, slot)
+            d.line((x, Y1, x, Y1+4), fill=0, width=1)
+            d.text((x-8, Y1+6), f"{hour:02d}", font=fonts['tiny'], fill=0)
     hour_ticks(tl, X0)
     hour_ticks(tr, X0+PW)
 
@@ -2290,11 +2311,8 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
         if arr is not None:
             n = len(arr)
             if n > 1:
-                t0 = arr[0]
-                i_float = (marker_dt - t0).total_seconds() / 900.0  # 900s = 15 min
-                i_float = max(0.0, min(n - 1, i_float))
-                slot_w = PW / (n - 1)
-                px = x0_panel + i_float * slot_w
+                current_slot = quarter_slot_index(marker_dt)
+                px = x_for_quarter_slot(x0_panel, PW, current_slot)
                 py = _price_to_y(cur_price)
                 draw_dashed_line(d, px, py, px, Y1 + 4, dash=2, gap=3, fill=0, width=1)
                 r = 6
@@ -2323,7 +2341,7 @@ def main():
     with ThreadPoolExecutor(max_workers=6) as executor:
         fut_pi = executor.submit(tibber_priceinfo)
         fut_quarter = executor.submit(tibber_priceinfo_quarter_range)
-        fut_hourly = executor.submit(tibber_hourly_consumption, last=48)
+        fut_consumption = executor.submit(tibber_consumption)
         fut_weather = executor.submit(fetch_openmeteo_hourly, api_key.LAT, api_key.LON)
         fut_sun = executor.submit(fetch_openmeteo_sunshine_hours, api_key.LAT, api_key.LON)
         fut_eco = executor.submit(ecoflow_status_bkw)
@@ -2364,7 +2382,11 @@ def main():
                 eco.get('soc')
             )
 
-        hourly = _future_result(fut_hourly, [], "Tibber Verbrauchsdaten fehlgeschlagen: %s")
+        consumption = _future_result(
+            fut_consumption,
+            {"resolution": "hourly", "nodes": []},
+            "Tibber Verbrauchsdaten fehlgeschlagen: %s",
+        )
         hourly_map = _future_result(fut_weather, {}, "Wetterdaten konnten nicht geladen werden: %s")
         sun_today_h, sun_tomorrow_h = _future_result(
             fut_sun, (None, None), "Sonnenstunden konnten nicht geladen werden: %s"
@@ -2407,6 +2429,10 @@ def main():
 
     left = normalize_price_slots_15min(left)
     right = normalize_price_slots_15min(right)
+    logging.info(
+        "Preis-Slots normalisiert: %s=%d, %s=%d",
+        labels[0].lower(), len(left), labels[1].lower(), len(right),
+    )
 
     today_slots = left if labels[0] == "Heute" else right
     current_price = pick_current_price(quarter_range, pi)
@@ -2417,17 +2443,53 @@ def main():
 
     pv_db_stats(tl_dt, labels[0])
     pv_db_stats(tr_dt, labels[1])
-    if hourly:
+    consumption_nodes = consumption.get("nodes") or []
+    consumption_resolution = consumption.get("resolution", "hourly")
+    if consumption_nodes:
+        parsed_consumption_times = []
+        for node in consumption_nodes:
+            try:
+                parsed_consumption_times.append(
+                    dt.datetime.fromisoformat(node["from"]).astimezone(LOCAL_TZ)
+                )
+            except (KeyError, TypeError, ValueError):
+                pass
         logging.info(
-            "Tibber Verbrauchsdaten via API: letzte %d Stunden, Start=%s, Ende=%s",
-            len(hourly),
-            hourly[0][0].strftime("%Y-%m-%d %H:%M"),
-            hourly[-1][0].strftime("%Y-%m-%d %H:%M")
+            "Tibber Verbrauchsdaten via API: n=%d, resolution=%s, Zeitstempel=%s",
+            len(consumption_nodes), consumption_resolution,
+            ", ".join(value.isoformat() for value in parsed_consumption_times),
         )
     else:
         logging.info("Keine Tibber-Verbrauchsdaten erhalten")
-    cons_left = upsample_hourly_to_quarter(tl_dt, hourly)
-    cons_right = upsample_hourly_to_quarter(tr_dt, hourly)
+    cons_left_times, cons_left_values = consumption_to_quarter_series(
+        consumption_nodes, left_date, LOCAL_TZ, consumption_resolution
+    )
+    cons_right_times, cons_right_values = consumption_to_quarter_series(
+        consumption_nodes, right_date, LOCAL_TZ, consumption_resolution
+    )
+    cons_left = pd.Series(cons_left_values)
+    cons_right = pd.Series(cons_right_values)
+
+    logging.info("Consumption %s: n=%d", labels[0].lower(),
+                 sum(value is not None for value in cons_left_values))
+    logging.info("Consumption %s: n=%d", labels[1].lower(),
+                 sum(value is not None for value in cons_right_values))
+    logging.info("Consumption resolution: %s", consumption_resolution)
+
+    def log_consumption_peak(label, timestamps, values):
+        valid = [(index, value) for index, value in enumerate(values)
+                 if value is not None and math.isfinite(float(value))]
+        if not valid:
+            logging.info("Peak %s: keine gültigen Verbrauchswerte", label.lower())
+            return
+        peak_index, peak_value = max(valid, key=lambda item: item[1])
+        logging.info(
+            "Peak %s: timestamp=%s, value=%.1f W, slot=%d",
+            label.lower(), timestamps[peak_index].isoformat(), peak_value, peak_index,
+        )
+
+    log_consumption_peak(labels[0], cons_left_times, cons_left_values)
+    log_consumption_peak(labels[1], cons_right_times, cons_right_values)
 
     logging.info(
         "Wetterdaten via Open-Meteo (lat=%.4f, lon=%.4f): hourly entries=%d",
