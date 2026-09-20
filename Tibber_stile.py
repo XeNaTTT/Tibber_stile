@@ -79,6 +79,15 @@ WEATHER_ICON_FILES = {
     "snow": "schnee_new.c",
 }
 
+# The Waveshare 7.5" V2 driver exposes an 800 x 480 canvas.  Keep the panel
+# geometry in one place so all renderers share the same, bounded layout.
+DISPLAY_WIDTH = 800
+DISPLAY_HEIGHT = 480
+WEATHER_PANEL_WIDTH = 176  # 22 %, preserving useful space for the charts
+WEATHER_PANEL_X = DISPLAY_WIDTH - WEATHER_PANEL_WIDTH
+MAIN_CONTENT_WIDTH = WEATHER_PANEL_X
+WEATHER_LOCATION = "Berlin"
+
 # ---------- Utils ----------
 def _to_float(x):
     """Robuste Zahl-Konvertierung: akzeptiert int/float/Strings (inkl. Vorzeichen, Komma)."""
@@ -930,6 +939,35 @@ def _parse_openmeteo_response(payload):
     return hourly_map, sunshine_by_date
 
 
+def _parse_current_weather(payload):
+    """Normalize Open-Meteo's ``current`` block without making it mandatory."""
+    current = payload.get("current") or payload.get("current_weather") or {}
+    if not isinstance(current, dict) or not current:
+        return None
+    try:
+        timestamp = dt.datetime.fromisoformat(current.get("time"))
+        timestamp = (timestamp.replace(tzinfo=LOCAL_TZ) if timestamp.tzinfo is None
+                     else timestamp.astimezone(LOCAL_TZ))
+    except (TypeError, ValueError):
+        timestamp = dt.datetime.now(LOCAL_TZ)
+    code = current.get("weather_code", current.get("weathercode"))
+    return {
+        "time": timestamp,
+        "temperature": _as_float_or_none(
+            current.get("temperature_2m", current.get("temperature"))
+        ),
+        "code": int(code) if code is not None else None,
+        "relative_humidity": _as_float_or_none(current.get("relative_humidity_2m")),
+        "wind_speed": _as_float_or_none(
+            current.get("wind_speed_10m", current.get("windspeed"))
+        ),
+        "wind_direction": _as_float_or_none(
+            current.get("wind_direction_10m", current.get("winddirection"))
+        ),
+        "is_day": bool(current.get("is_day", 1)),
+    }
+
+
 def _fetch_openmeteo_model(lat, lon, model, today):
     response = requests.get(
         OPEN_METEO_FORECAST_URL,
@@ -938,6 +976,8 @@ def _fetch_openmeteo_model(lat, lon, model, today):
             "longitude": lon,
             "hourly": "temperature_2m,precipitation_probability,weather_code,is_day",
             "daily": "sunshine_duration",
+            "current": ("temperature_2m,weather_code,relative_humidity_2m,"
+                        "wind_speed_10m,wind_direction_10m,is_day"),
             "forecast_days": 3,
             "timezone": "Europe/Berlin",
             "models": model,
@@ -945,7 +985,9 @@ def _fetch_openmeteo_model(lat, lon, model, today):
         timeout=10,
     )
     response.raise_for_status()
-    hourly_map, sunshine_by_date = _parse_openmeteo_response(response.json())
+    payload = response.json()
+    hourly_map, sunshine_by_date = _parse_openmeteo_response(payload)
+    current_weather = _parse_current_weather(payload)
     required = _required_weather_times(today)
     missing = required.difference(hourly_map)
     incomplete = {
@@ -962,7 +1004,7 @@ def _fetch_openmeteo_model(lat, lon, model, today):
             % (model, len(missing), len(incomplete),
                sum(value is None for value in sunshine))
         )
-    return hourly_map, sunshine
+    return hourly_map, sunshine, current_weather
 
 
 def fetch_openmeteo_forecast(lat, lon, include_model=False):
@@ -975,12 +1017,14 @@ def fetch_openmeteo_forecast(lat, lon, include_model=False):
     today = dt.datetime.now(LOCAL_TZ).date()
     for model, display_name in WEATHER_MODELS:
         try:
-            hourly_map, sunshine = _fetch_openmeteo_model(lat, lon, model, today)
-            result = (hourly_map, sunshine, display_name)
+            hourly_map, sunshine, current_weather = _fetch_openmeteo_model(
+                lat, lon, model, today
+            )
+            result = (hourly_map, sunshine, display_name, current_weather)
             return result if include_model else result[:2]
         except Exception as error:
             logging.warning("Open-Meteo model %s unavailable: %s", model, error)
-    result = ({}, (None, None), None)
+    result = ({}, (None, None), None, None)
     return result if include_model else result[:2]
 
 
@@ -1954,6 +1998,150 @@ def meteo_bucket(code):
     return "cloudy"
 
 
+def weather_code_text(code):
+    """Return a deliberately short German label for a WMO weather code."""
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return "Wetterdaten nicht verfuegbar"
+    if code == 0:
+        return "Klar"
+    if code in (1, 2):
+        return "Leicht bewoelkt"
+    if code == 3:
+        return "Bewoelkt"
+    if code in (45, 48):
+        return "Nebel"
+    if code in (51, 53, 55, 56, 57):
+        return "Nieselregen"
+    if code in (61, 63, 65, 66, 67):
+        return "Regen"
+    if code in (71, 73, 75, 77):
+        return "Schnee"
+    if code in (80, 81, 82):
+        return "Schauer"
+    if code in (85, 86):
+        return "Schneeschauer"
+    if code in (95, 96, 99):
+        return "Gewitter"
+    return "Bewoelkt"
+
+
+def wind_direction_text(degrees):
+    """Convert meteorological degrees to one of eight readable directions."""
+    value = _as_float_or_none(degrees)
+    if value is None:
+        return "--"
+    names = ("Nord", "Nordost", "Ost", "Suedost", "Sued", "Suedwest",
+             "West", "Nordwest")
+    return names[int((value % 360 + 22.5) // 45) % len(names)]
+
+
+def _center_text(draw, box, text, font, fill=0):
+    text_w, text_h = _text_size(draw, text, font)
+    left, top, right, bottom = box
+    draw.text((left + (right - left - text_w) / 2,
+               top + (bottom - top - text_h) / 2), text, font=font, fill=fill)
+
+
+def draw_current_weather_background(img, area, code, is_day=True):
+    """Draw a sparse 1-bit ink-wash motif, avoiding the central text zones."""
+    x0, y0, x1, y1 = map(int, area)
+    draw = ImageDraw.Draw(img)
+    bucket = meteo_bucket(code)
+    # Sparse ordered dots at the outer edge suggest pale ink without greys.
+    for y in range(y0 + 12, y0 + 125, 8):
+        for x in range(x1 - 70, x1 - 5, 8):
+            if ((x + 3 * y) // 8) % 7 == 0:
+                draw.point((x, y), fill=0)
+    if bucket == "clear":
+        cx, cy = x1 - 28, y0 + 75
+        draw.arc((cx - 25, cy - 25, cx + 25, cy + 25), 110, 285, fill=0)
+    elif bucket == "fog":
+        for offset in (0, 12, 25, 39):
+            draw.arc((x0 + 12, y0 + 48 + offset, x1 - 8, y0 + 78 + offset),
+                     190, 350, fill=0)
+    else:
+        # Cloud contours remain above and beside the large temperature.
+        draw.arc((x0 + 15, y0 + 63, x0 + 92, y0 + 116), 185, 355, fill=0)
+        draw.arc((x0 + 68, y0 + 45, x1 + 18, y0 + 115), 170, 345, fill=0)
+        if bucket in ("rain", "drizzle", "thunder"):
+            for index in range(5):
+                rx = x1 - 72 + index * 14
+                draw.line((rx, y0 + 122, rx - 7, y0 + 143), fill=0)
+        elif bucket == "snow":
+            for index in range(5):
+                sx, sy = x1 - 70 + index * 14, y0 + 132 + (index % 2) * 9
+                draw.line((sx - 2, sy, sx + 2, sy), fill=0)
+                draw.line((sx, sy - 2, sx, sy + 2), fill=0)
+        if bucket == "thunder":
+            draw.line((x1 - 35, y0 + 116, x1 - 45, y0 + 138,
+                       x1 - 35, y0 + 136, x1 - 48, y0 + 161), fill=0, width=2)
+    if not is_day:
+        draw.arc((x0 + 13, y0 + 34, x0 + 58, y0 + 80), 65, 285, fill=0)
+    # A quiet, discontinuous landscape anchors the bottom without a dark mass.
+    horizon = y1 - 35
+    draw.arc((x0 - 30, horizon - 20, x0 + 95, horizon + 23), 190, 345, fill=0)
+    draw.arc((x0 + 52, horizon - 13, x1 + 25, horizon + 20), 190, 350, fill=0)
+    for tx, height in ((x1 - 48, 26), (x1 - 27, 18), (x0 + 18, 14)):
+        draw.line((tx, y1 - 8, tx, y1 - 8 - height), fill=0)
+        draw.line((tx, y1 - 8 - height, tx - 7, y1 - 1 - height), fill=0)
+        draw.line((tx, y1 - 13 - height, tx + 6, y1 - 7 - height), fill=0)
+
+
+def draw_current_weather_panel(draw, img, area, fonts, current_weather,
+                               location=WEATHER_LOCATION):
+    """Render the current conditions panel even when current data is absent."""
+    x0, y0, x1, y1 = area
+    weather = current_weather or {}
+    timestamp = weather.get("time") or dt.datetime.now(LOCAL_TZ)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=LOCAL_TZ)
+    else:
+        timestamp = timestamp.astimezone(LOCAL_TZ)
+    draw_current_weather_background(img, area, weather.get("code"),
+                                    weather.get("is_day", True))
+    inner = (x0 + 8, y0, x1 - 8, y1)
+    _center_text(draw, (inner[0], y0 + 14, inner[2], y0 + 37), location,
+                 fonts["panel_bold"])
+    weekdays = ("Mo", "Di", "Mi", "Do", "Fr", "Sa", "So")
+    date_text = f"{weekdays[timestamp.weekday()]}, {timestamp:%d.%m.%Y}"
+    _center_text(draw, (inner[0], y0 + 39, inner[2], y0 + 59), date_text,
+                 fonts["panel_small"])
+    _center_text(draw, (inner[0], y0 + 61, inner[2], y0 + 82),
+                 timestamp.strftime("%H:%M"), fonts["panel_small"])
+    temperature = weather.get("temperature")
+    temperature_text = "--°" if temperature is None else f"{round(temperature)}°"
+    _center_text(draw, (inner[0], y0 + 113, inner[2], y0 + 205),
+                 temperature_text, fonts["panel_temperature"])
+    condition = weather_code_text(weather.get("code"))
+    condition_font = (fonts["panel_tiny"] if weather.get("code") is None
+                      else fonts["panel_condition"])
+    _center_text(draw, (inner[0], y0 + 207, inner[2], y0 + 238), condition,
+                 condition_font)
+    humidity = weather.get("relative_humidity")
+    wind = weather.get("wind_speed")
+    humidity_text = "-- %" if humidity is None else f"{round(humidity)} %"
+    wind_text = "-- km/h" if wind is None else f"{round(wind)} km/h"
+    label_x, value_x = x0 + 17, x0 + 103
+    details_y = y0 + 284
+    draw.text((label_x, details_y), "Luftfeuchte", font=fonts["panel_tiny"], fill=0)
+    draw.text((value_x, details_y), humidity_text, font=fonts["panel_tiny"], fill=0)
+    draw.text((label_x, details_y + 27), "Wind", font=fonts["panel_tiny"], fill=0)
+    draw.text((value_x, details_y + 27), wind_text, font=fonts["panel_tiny"], fill=0)
+    direction = wind_direction_text(weather.get("wind_direction"))
+    _center_text(draw, (x0 + 25, details_y + 52, x1 - 8, details_y + 76),
+                 direction, fonts["panel_small"])
+    # Arrow points towards the bearing; it is intentionally simple for 1-bit.
+    degrees = _as_float_or_none(weather.get("wind_direction"))
+    if degrees is not None:
+        radians = math.radians(degrees - 90)
+        cx, cy, radius = x0 + 25, details_y + 64, 9
+        ex, ey = cx + math.cos(radians) * radius, cy + math.sin(radians) * radius
+        draw.line((cx, cy, ex, ey), fill=0, width=2)
+        draw.ellipse((ex - 2, ey - 2, ex + 2, ey + 2), fill=0)
+
+
 def draw_weather_icon(draw, x, y, size, code, is_day, fill=0):
     scale = max(1.0, float(size) / 40.0)
     width = 2
@@ -2535,6 +2723,11 @@ def main():
     epd = epd7in5_V2.EPD()
     epd.init(); epd.Clear()
     w, h = epd.width, epd.height
+    if (w, h) != (DISPLAY_WIDTH, DISPLAY_HEIGHT):
+        raise RuntimeError(
+            f"Unerwartete Displaygroesse {w}x{h}; erwartet "
+            f"{DISPLAY_WIDTH}x{DISPLAY_HEIGHT} (Waveshare 7.5 V2)"
+        )
 
     def _future_result(fut, default, error_msg):
         try:
@@ -2585,8 +2778,8 @@ def main():
             {"resolution": "hourly", "nodes": []},
             "Tibber Verbrauchsdaten fehlgeschlagen: %s",
         )
-        hourly_map, sunshine, weather_model = _future_result(
-            fut_weather, ({}, (None, None), None),
+        hourly_map, sunshine, weather_model, current_weather = _future_result(
+            fut_weather, ({}, (None, None), None, None),
             "Wetterdaten konnten nicht geladen werden: %s"
         )
         sun_today_h, sun_tomorrow_h = sunshine
@@ -2754,10 +2947,30 @@ def main():
         f_temperature = ImageFont.truetype(
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 19
         )
+        f_panel_bold = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16
+        )
+        f_panel_small = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12
+        )
+        f_panel_tiny = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11
+        )
+        f_panel_temperature = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 67
+        )
+        f_panel_condition = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18
+        )
     except Exception:
         f_bold = f_small = f_tiny = f_temperature = ImageFont.load_default()
+        f_panel_bold = f_panel_small = f_panel_tiny = ImageFont.load_default()
+        f_panel_temperature = f_panel_condition = ImageFont.load_default()
     fonts = {'bold': f_bold, 'small': f_small, 'tiny': f_tiny,
-             'temperature': f_temperature}
+             'temperature': f_temperature, 'panel_bold': f_panel_bold,
+             'panel_small': f_panel_small, 'panel_tiny': f_panel_tiny,
+             'panel_temperature': f_panel_temperature,
+             'panel_condition': f_panel_condition}
 
     # Layout
     margin = 10
@@ -2767,7 +2980,7 @@ def main():
         img,
         margin,
         margin,
-        w - margin * 2,
+        MAIN_CONTENT_WIDTH - margin * 2,
         top_h,
         fonts,
         weather_days,
@@ -2776,11 +2989,12 @@ def main():
     )
 
     # Info-Zeile tiefer und zentriert
-    draw_info_box(d, info, fonts, y=top_h + margin + 18, width=w-20)
+    draw_info_box(d, info, fonts, y=top_h + margin + 18,
+                  width=MAIN_CONTENT_WIDTH - margin * 2)
 
     # Chart kleiner in der HÃ¶he + Platz fÃ¼r Stunden
     chart_top = top_h + margin + 48
-    chart_area = (margin, chart_top, w - margin, h-70)
+    chart_area = (margin, chart_top, MAIN_CONTENT_WIDTH - margin, h-70)
 
     draw_two_day_chart(
         img, d, left, right, fonts, labels, chart_area,
@@ -2788,6 +3002,11 @@ def main():
         cons_left=cons_left, cons_right=cons_right,
         cur_dt=info['current_dt'], cur_price=info['current_price'],
         live_snapshot=live_snapshot,
+    )
+
+    draw_current_weather_panel(
+        d, img, (WEATHER_PANEL_X, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT),
+        fonts, current_weather,
     )
 
     footer = dt.datetime.now(LOCAL_TZ).strftime("Update: %H:%M %d.%m.%Y")
