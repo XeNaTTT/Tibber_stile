@@ -4,3 +4,8 @@ tibber_snapshots.db
 *.db-wal
 *.db-shm
 .venv/
+
+# Locally generated dashboard previews
+/dashboard_preview.png
+/screen_sim.png
+/weather_assets_preview.png
