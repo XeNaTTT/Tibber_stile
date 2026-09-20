@@ -11,9 +11,16 @@ from energy_chart_utils import (
     QUARTER_SLOTS_PER_DAY,
     consumption_to_quarter_series,
     format_power_peak,
+    merge_consumption_series,
     price_slots_to_quarters,
     quarter_slot_index,
     x_for_quarter_slot,
+)
+from tibber_live import (
+    DEFAULT_DB as TIBBER_SNAPSHOT_DB,
+    get_tibber_live_snapshot,
+    load_local_quarter_series,
+    store_snapshot,
 )
 
 ECO_DEBUG = bool(int(os.getenv("ECO_DEBUG", "0")))
@@ -68,7 +75,7 @@ WEATHER_ICON_FILES = {
     "fog": "nebel_new.c",
     "rain": "regen_new.c",
     "showers": "schauer_new.c",
-    "thunder": "gewiter_new.c",  # Name of the supplied file (one "t").
+    "thunder": "gewitter_new.c",
     "snow": "schnee_new.c",
 }
 
@@ -844,18 +851,23 @@ def _tibber_consumption_request(resolution, last):
 
 
 def tibber_consumption():
-    """Use real quarter-hour consumption when supported, otherwise hourly.
-
-    QUARTER_HOURLY is feature/market dependent in Tibber's API, so an API
-    rejection is handled explicitly rather than manufacturing quarter values.
-    """
-    try:
-        nodes = _tibber_consumption_request("QUARTER_HOURLY", 192)
-        if nodes:
-            return {"resolution": "15min", "nodes": nodes}
-    except Exception as exc:
-        logging.info("15-Minuten-Verbrauch nicht verfügbar, nutze Stundenwerte: %s", exc)
+    """Fetch Tibber's historical consumption at its supported hourly resolution."""
     return {"resolution": "hourly", "nodes": _tibber_consumption_request("HOURLY", 48)}
+
+
+def fetch_and_store_live_snapshot():
+    """Best-effort one-shot Pulse read; never makes display rendering fatal."""
+    try:
+        preferred_home_id = os.getenv("TIBBER_LIVE_HOME_ID") or None
+        snapshot = get_tibber_live_snapshot(api_key.API_KEY, preferred_home_id)
+        inserted, interval = store_snapshot(snapshot, TIBBER_SNAPSHOT_DB)
+        logging.info("Tibber Pulse snapshot: timestamp=%s power=%sW inserted=%s interval=%s",
+                     snapshot.timestamp.isoformat(), snapshot.power_w, inserted,
+                     (interval or {}).get("quality", "first_snapshot"))
+        return snapshot
+    except Exception as exc:
+        logging.warning("Tibber Pulse snapshot unavailable; continuing without live data: %s", exc)
+        return None
 
 # ---------- Wetter ----------
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -2212,6 +2224,25 @@ def draw_info_box(d, info, fonts, y, width):
         d.text((tx, ty), label, font=fonts['bold'], fill=0)
 
 
+def format_live_power(watts):
+    if watts is None or not math.isfinite(float(watts)) or float(watts) < 0:
+        return "-- W"
+    watts = float(watts)
+    return f"{watts / 1000:.2f} kW".replace(".", ",") if watts >= 1000 else f"{watts:.0f} W"
+
+
+def draw_live_consumption_box(d, fonts, snapshot, x, y, w=142, h=62):
+    """Draw the optional Pulse readout over the chart without resizing it."""
+    d.rectangle((x, y, x + w, y + h), fill=255, outline=0, width=2)
+    d.text((x + 7, y + 5), "VERBRAUCH AKTUELL", font=fonts['tiny'], fill=0)
+    power = snapshot.power_w if snapshot is not None else None
+    d.text((x + 7, y + 20), format_live_power(power), font=fonts['bold'], fill=0)
+    last_hour = snapshot.accumulated_consumption_last_hour_kwh if snapshot is not None else None
+    if last_hour is not None and math.isfinite(float(last_hour)) and 0 <= float(last_hour) <= 100:
+        label = f"Stunde  {float(last_hour):.2f} kWh".replace(".", ",")
+        d.text((x + 7, y + 43), label, font=fonts['tiny'], fill=0)
+
+
 def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
                        pv_left=None, pv_right=None,
                        cons_left=None, cons_right=None,
@@ -2361,12 +2392,12 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             img.paste(pv_dither, (0, 0), pv_mask)
         # Verbrauch als gut sichtbare Kurve statt als gefuellte Flaeche.
         if cons_points:
-            # Missing quarters in an hourly response are connected only for
-            # presentation; they do not become invented measured values.
-            measured_points = [point for point in cons_points if point is not None]
-            if len(measured_points) > 1:
-                smooth = _densify_points(measured_points, steps=4)
-                d.line(smooth, fill=0, width=3)
+            # Never bridge missing quarters: an hourly value or a Pulse gap
+            # remains a measured point, not an invented higher-resolution line.
+            for segment in _segments_from_points(cons_points):
+                d.line(segment, fill=0, width=3)
+            for point in (point for point in cons_points if point is not None):
+                d.ellipse((point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2), fill=0)
         _draw_price_shadow(xs, val_list)
         # Preis Stufenlinie
         for i in range(n):
@@ -2508,7 +2539,7 @@ def main():
             return default
 
     # Daten parallel vorab laden (API + DB), Display-Update erst am Ende.
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         fut_pi = executor.submit(tibber_priceinfo)
         fut_quarter = executor.submit(tibber_priceinfo_quarter_range)
         fut_consumption = executor.submit(tibber_consumption)
@@ -2517,6 +2548,7 @@ def main():
             getattr(api_key, "LAT", 0), getattr(api_key, "LON", 0),
             True,
         )
+        fut_live = executor.submit(fetch_and_store_live_snapshot)
 
         # Daten laden, robust gegen API-Ausfall
         tibber_source = "api"
@@ -2553,6 +2585,9 @@ def main():
             "Wetterdaten konnten nicht geladen werden: %s"
         )
         sun_today_h, sun_tomorrow_h = sunshine
+        live_snapshot = _future_result(
+            fut_live, None, "Tibber Pulse snapshot failed unexpectedly: %s"
+        )
 
     # Consumption and prices deliberately share the same two complete day
     # panels.  Tomorrow's prices remain cached by the regular Tibber flow, but
@@ -2626,6 +2661,12 @@ def main():
     cons_right_times, cons_right_values = consumption_to_quarter_series(
         consumption_nodes, right_date, LOCAL_TZ, consumption_resolution
     )
+    cons_left_values = merge_consumption_series(
+        cons_left_values, load_local_quarter_series(left_date, TIBBER_SNAPSHOT_DB)
+    )
+    cons_right_values = merge_consumption_series(
+        cons_right_values, load_local_quarter_series(right_date, TIBBER_SNAPSHOT_DB)
+    )
     cons_left = pd.Series(cons_left_values)
     cons_right = pd.Series(cons_right_values)
 
@@ -2649,7 +2690,10 @@ def main():
         peak_index, peak_value = max(valid, key=lambda item: item[1])
         logging.info(
             "Peak %s: timestamp=%s, value=%.1f W, slot=%d",
-            label.lower(), timestamps[peak_index].isoformat(), peak_value, peak_index,
+            label.lower(),
+            (timestamps[peak_index].isoformat() if timestamps[peak_index] is not None
+             else f"local-slot-{peak_index}"),
+            peak_value, peak_index,
         )
 
     log_consumption_peak(labels[0], cons_left_times, cons_left_values)
@@ -2739,6 +2783,7 @@ def main():
         cons_left=cons_left, cons_right=cons_right,
         cur_dt=info['current_dt'], cur_price=info['current_price']
     )
+    draw_live_consumption_box(d, fonts, live_snapshot, w - margin - 142, chart_top - 30)
 
     footer = dt.datetime.now(LOCAL_TZ).strftime("Update: %H:%M %d.%m.%Y")
     d.text((10, h-10), footer, font=fonts['tiny'], fill=0)

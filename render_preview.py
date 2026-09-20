@@ -54,8 +54,19 @@ def render_dashboard(path):
     dashboard.draw_weather_dashboard(
         draw, image, 10, 10, 780, 164, fonts(), weather_days, 6.4, 3.8
     )
-    draw.text((10, 200), "Wetter-Preview (native 90 x 81 px, ohne Dithering)",
+    sample = types.SimpleNamespace(power_w=153,
+                                   accumulated_consumption_last_hour_kwh=0.1315)
+    dashboard.draw_live_consumption_box(draw, fonts(), sample, 648, 182)
+    draw.text((10, 200), "Display-Preview mit Tibber Pulse",
               font=fonts()["bold"], fill=0)
+    # A few genuine local interval points on a 96-slot day axis.
+    values = [None] * 96
+    values[52:56] = [145, 164, 151, 172]
+    for slot, value in enumerate(values):
+        if value is not None:
+            x = dashboard.x_for_quarter_slot(10, 780, slot)
+            y = 430 - value * 0.5
+            draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=0)
     image.save(path)
 
 

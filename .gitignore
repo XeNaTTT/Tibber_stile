@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+tibber_snapshots.db
+*.db-wal
+*.db-shm
+.venv/
