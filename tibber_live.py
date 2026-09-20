@@ -23,6 +23,18 @@ HTTP_TIMEOUT_SECONDS = 15
 WEBSOCKET_TIMEOUT_SECONDS = 15
 
 
+def _load_websocket_connect():
+    """Load the current websockets client API, falling back to versions such as 10.4."""
+    try:
+        from websockets.asyncio.client import connect
+    except ImportError:
+        try:
+            from websockets import connect
+        except ImportError as exc:
+            raise RuntimeError("Python package 'websockets' is not installed") from exc
+    return connect
+
+
 @dataclass(frozen=True)
 class LiveSnapshot:
     timestamp: dt.datetime
@@ -98,10 +110,7 @@ def fetch_live_config(token, preferred_home_id=None, session=None):
 
 
 async def _receive_one_snapshot(websocket_url, home_id, token, timeout):
-    try:
-        from websockets.asyncio.client import connect
-    except ImportError as exc:
-        raise RuntimeError("Python package 'websockets' is not installed") from exc
+    connect = _load_websocket_connect()
     query = """subscription LiveMeasurement($homeId: ID!) {
       liveMeasurement(homeId: $homeId) { timestamp power averagePower minPower maxPower
         accumulatedConsumption accumulatedConsumptionLastHour lastMeterConsumption signalStrength }
