@@ -32,6 +32,40 @@ class SnapshotTests(unittest.TestCase):
         self.assertIsNone(select_realtime_home(homes, "off"))
 
 
+class WebsocketImportTests(unittest.TestCase):
+    def test_modern_websockets_connect_is_preferred(self):
+        from tibber_live import _load_websocket_connect
+
+        modern_connect = object()
+        original_import = __import__
+
+        def import_module(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "websockets.asyncio.client":
+                return type("ModernClient", (), {"connect": modern_connect})
+            if name == "websockets":
+                self.fail("legacy websockets API should not be imported")
+            return original_import(name, globals, locals, fromlist, level)
+
+        with mock.patch("builtins.__import__", side_effect=import_module):
+            self.assertIs(modern_connect, _load_websocket_connect())
+
+    def test_legacy_websockets_connect_is_used_when_modern_api_is_missing(self):
+        from tibber_live import _load_websocket_connect
+
+        legacy_connect = object()
+        original_import = __import__
+
+        def import_module(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "websockets.asyncio.client":
+                raise ImportError("no websockets.asyncio package")
+            if name == "websockets":
+                return type("LegacyWebsockets", (), {"connect": legacy_connect})
+            return original_import(name, globals, locals, fromlist, level)
+
+        with mock.patch("builtins.__import__", side_effect=import_module):
+            self.assertIs(legacy_connect, _load_websocket_connect())
+
+
 class IntervalTests(unittest.TestCase):
     def test_meter_delta_and_actual_duration_power(self):
         result = calculate_interval(
