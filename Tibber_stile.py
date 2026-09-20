@@ -51,7 +51,17 @@ SUN_TODAY = None
 SUN_TOMORROW = None
 
 # Weather icon config
-WEATHER_ICON_DIR = "/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/Wettersymbole"
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Older installations kept the C bitmaps in ``Wettersymbole`` while this
+# repository stores them next to the renderer.  Both locations contain the
+# existing assets; no generated/weather-service artwork is needed.
+WEATHER_ICON_DIR = next(
+    (path for path in (
+        os.path.join(PROJECT_DIR, "Wettersymbole"), PROJECT_DIR,
+        "/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/Wettersymbole",
+    ) if os.path.isdir(path)),
+    PROJECT_DIR,
+)
 WEATHER_ICON_WIDTH = 240
 WEATHER_ICON_HEIGHT = 235
 ICON_INVERT = True
@@ -828,16 +838,19 @@ def tibber_consumption():
     return {"resolution": "hourly", "nodes": _tibber_consumption_request("HOURLY", 48)}
 
 # ---------- Wetter ----------
-def fetch_openmeteo_hourly(lat, lon):
+def fetch_openmeteo_forecast(lat, lon):
     """
-    Holt Open-Meteo stündliche Wettercodes + Tag/Nacht.
-    Return: {datetime_local_hour: (code:int, is_day:bool)}
+    Fetch the three-day hourly forecast and two daily sunshine totals.
+
+    Three forecast days are intentional: tomorrow's night ends at 06:00 on
+    the day after tomorrow.
     """
     try:
         url = (
             "https://api.open-meteo.com/v1/forecast"
             f"?latitude={lat}&longitude={lon}"
-            "&hourly=weathercode,is_day"
+            "&hourly=temperature_2m,precipitation_probability,weather_code,is_day"
+            "&daily=sunshine_duration&forecast_days=3"
             "&timezone=Europe%2FBerlin"
         )
         r = requests.get(url, timeout=10)
@@ -845,21 +858,40 @@ def fetch_openmeteo_hourly(lat, lon):
         j = r.json()
         hourly = j.get("hourly", {}) or {}
         times = hourly.get("time") or []
-        codes = hourly.get("weathercode") or []
+        temperatures = hourly.get("temperature_2m") or []
+        precipitation = hourly.get("precipitation_probability") or []
+        codes = hourly.get("weather_code") or hourly.get("weathercode") or []
         is_day_list = hourly.get("is_day") or []
         hourly_map = {}
-        for t_str, code, is_day in zip(times, codes, is_day_list):
+        for t_str, temperature, rain, code, is_day in zip(
+                times, temperatures, precipitation, codes, is_day_list):
             try:
                 t = dt.datetime.fromisoformat(t_str)
                 if t.tzinfo is None:
                     t = t.replace(tzinfo=LOCAL_TZ)
-                hourly_map[t] = (int(code), bool(is_day))
+                hourly_map[t] = {
+                    "temperature": _as_float_or_none(temperature),
+                    "precipitation_probability": _as_float_or_none(rain),
+                    "code": int(code),
+                    "is_day": bool(is_day),
+                }
             except Exception:
                 continue
-        return hourly_map
+        sunshine = (j.get("daily") or {}).get("sunshine_duration") or []
+        sun_hours = [(_as_float_or_none(value) / 3600.0)
+                     if _as_float_or_none(value) is not None else None
+                     for value in sunshine[:2]]
+        while len(sun_hours) < 2:
+            sun_hours.append(None)
+        return hourly_map, tuple(sun_hours)
     except Exception as e:
         logging.error("Open-Meteo hourly fetch failed: %s", e)
-        return {}
+        return {}, (None, None)
+
+
+def fetch_openmeteo_hourly(lat, lon):
+    """Compatibility wrapper for callers which only need hourly data."""
+    return fetch_openmeteo_forecast(lat, lon)[0]
 
 def fetch_openmeteo_sunshine_hours(lat, lon):
     """
@@ -886,6 +918,70 @@ def fetch_openmeteo_sunshine_hours(lat, lon):
     except Exception as e:
         logging.error("Open-Meteo sunshine fetch failed: %s", e)
         return None, None
+
+
+WEATHER_PERIODS = (
+    ("Vorm.", 6, 12, 0),
+    ("Nachm.", 12, 18, 0),
+    ("Abend", 18, 22, 0),
+    ("Nacht", 22, 6, 1),
+)
+
+_WEATHER_SEVERITY = {
+    "clear": 0, "partly": 1, "cloudy": 2, "overcast": 3,
+    "fog": 4, "drizzle": 5, "rain": 6, "snow": 7, "thunder": 9,
+}
+
+
+def weather_code_severity(code):
+    """Rank meaningful WMO events above merely frequent benign conditions."""
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return 2
+    if code in (95, 96, 99):
+        return 10
+    if code in (65, 67, 82):
+        return 9
+    if code in (71, 73, 75, 77, 85, 86):
+        return 8
+    return _WEATHER_SEVERITY.get(meteo_bucket(code), 2)
+
+
+def aggregate_weather_period(hourly_map, day, start_hour, end_hour, end_day_offset=0):
+    """Aggregate one explicit half-open local-time interval."""
+    start = dt.datetime.combine(day, dt.time(start_hour), tzinfo=LOCAL_TZ)
+    end_day = day + dt.timedelta(days=end_day_offset)
+    end = dt.datetime.combine(end_day, dt.time(end_hour), tzinfo=LOCAL_TZ)
+    rows = [row for timestamp, row in hourly_map.items() if start <= timestamp < end]
+    temperatures = [row.get("temperature") for row in rows
+                    if row.get("temperature") is not None]
+    rain = [row.get("precipitation_probability") for row in rows
+            if row.get("precipitation_probability") is not None]
+    representative = max(
+        rows,
+        key=lambda row: weather_code_severity(row.get("code")),
+        default=None,
+    )
+    return {
+        "temperature": round(sum(temperatures) / len(temperatures)) if temperatures else None,
+        "precipitation_probability": round(max(rain)) if rain else None,
+        "code": representative.get("code") if representative else None,
+        "is_day": representative.get("is_day") if representative else start_hour != 22,
+        "count": len(rows),
+    }
+
+
+def aggregate_weather_days(hourly_map, today=None):
+    today = today or dt.datetime.now(LOCAL_TZ).date()
+    result = []
+    for day_offset in (0, 1):
+        day = today + dt.timedelta(days=day_offset)
+        result.append([
+            aggregate_weather_period(hourly_map, day, start, end, next_day)
+            for _label, start, end, next_day in WEATHER_PERIODS
+        ])
+    return result
 
 # ---------- EcoFlow (BKW/PowerStream, signierte Requests) ----------
 import time, uuid, hmac, hashlib
@@ -1893,52 +1989,65 @@ def draw_weather_icon(draw, x, y, size, code, is_day, fill=0):
         draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
 
 
-def draw_weather_box(d, img, x, y, w, h, fonts, hourly_map, sun_today_h=None, sun_tomorrow_h=None):
-    d.rectangle((x, y, x + w, y + h), outline=0, width=2)
-    icon_size = 40
-    icon_x = x + 10
-    icon_y = y + int((h - icon_size) / 2)
+def _draw_raindrop(draw, x, y):
+    draw.polygon(((x + 3, y), (x, y + 6), (x + 1, y + 9),
+                  (x + 5, y + 9), (x + 6, y + 6)), outline=0, fill=None)
 
-    now = dt.datetime.now(LOCAL_TZ)
-    hour = now.replace(minute=0, second=0, microsecond=0)
-    code, is_day = hourly_map.get(hour, (None, None))
-    icon = None
-    if code is not None:
-        try:
-            icon = _get_weather_icon_image(
-                meteo_bucket(code),
-                is_day,
-                invert=ICON_INVERT,
-                bitreverse=ICON_BITREVERSE,
-            )
-        except Exception as e:
-            logging.warning("Weather-Icon laden fehlgeschlagen: %s", e)
-    if icon is not None:
-        icon = icon.resize((icon_size, icon_size), resample=Image.NEAREST)
-        img.paste(icon, (icon_x, icon_y))
-    elif code is not None:
-        draw_weather_icon(d, icon_x, icon_y, icon_size, code, is_day, fill=0)
-    else:
-        draw_weather_icon(d, icon_x, icon_y, icon_size, 3, True, fill=0)
 
-    title = "Wetter"
-    title_w, title_h = _text_size(d, title, fonts['bold'])
-    text_x = x + 60
-    lines = []
-    if ECO_DEBUG and code is not None:
-        lines.append(f"Code: {code}")
-
-    lines.append(f"Sonne heute: {_fmt_hours(sun_today_h)} h")
-    lines.append(f"Sonne morgen: {_fmt_hours(sun_tomorrow_h)} h")
-
-    line_heights = [title_h] + [_text_size(d, line, fonts['small'])[1] for line in lines]
-    total_h = sum(line_heights) + 6
-    start_y = y + max(6, int((h - total_h) / 2))
-    d.text((text_x, start_y), title, font=fonts['bold'], fill=0)
-    line_y = start_y + title_h + 4
-    for line in lines:
-        d.text((text_x, line_y), line, font=fonts['small'], fill=0)
-        line_y += _text_size(d, line, fonts['small'])[1] + 2
+def draw_weather_dashboard(d, img, x, y, w, h, fonts, weather_days,
+                           sun_today_h=None, sun_tomorrow_h=None):
+    """Render two equal days, each containing four equal forecast periods."""
+    half_w = w / 2
+    header_h = 25
+    cell_w = half_w / 4
+    suns = (sun_today_h, sun_tomorrow_h)
+    day_names = ("Wetter heute", "Wetter morgen")
+    d.line((x, y + h, x + w, y + h), fill=0, width=1)
+    for day_index in range(2):
+        day_x = x + day_index * half_w
+        d.text((day_x + 5, y + 4), day_names[day_index], font=fonts["bold"], fill=0)
+        sunshine = f"Sonne: {_fmt_hours(suns[day_index]).replace('.', ',')} h"
+        sunshine_w, _ = _text_size(d, sunshine, fonts["small"])
+        d.text((day_x + half_w - sunshine_w - 5, y + 5), sunshine,
+               font=fonts["small"], fill=0)
+        d.line((day_x, y + header_h, day_x + half_w, y + header_h), fill=0, width=1)
+        for period_index, (label, _start, _end, _offset) in enumerate(WEATHER_PERIODS):
+            cell_x = day_x + period_index * cell_w
+            if period_index:
+                d.line((cell_x, y + header_h + 4, cell_x, y + h - 4), fill=0, width=1)
+            data = weather_days[day_index][period_index]
+            label_w, _ = _text_size(d, label, fonts["tiny"])
+            d.text((cell_x + (cell_w - label_w) / 2, y + 29), label,
+                   font=fonts["tiny"], fill=0)
+            temperature = "--°" if data["temperature"] is None else f'{data["temperature"]}°'
+            temp_w, _ = _text_size(d, temperature, fonts["temperature"])
+            d.text((cell_x + (cell_w - temp_w) / 2, y + 43), temperature,
+                   font=fonts["temperature"], fill=0)
+            icon_size = min(48, int(cell_w - 12))
+            icon_x = int(cell_x + (cell_w - icon_size) / 2)
+            icon_y = y + 68
+            icon = None
+            if data["code"] is not None:
+                try:
+                    icon = _get_weather_icon_image(
+                        meteo_bucket(data["code"]), data["is_day"],
+                        invert=ICON_INVERT, bitreverse=ICON_BITREVERSE,
+                    ).resize((icon_size, icon_size), Image.NEAREST)
+                except Exception as exc:
+                    logging.warning("Weather-Icon laden fehlgeschlagen: %s", exc)
+            if icon is not None:
+                img.paste(icon, (icon_x, icon_y))
+            else:
+                draw_weather_icon(d, icon_x, icon_y, icon_size,
+                                  data["code"] if data["code"] is not None else 3,
+                                  data["is_day"], fill=0)
+            rain = ("-- %" if data["precipitation_probability"] is None
+                    else f'{data["precipitation_probability"]} %')
+            rain_w, _ = _text_size(d, rain, fonts["tiny"])
+            rain_x = cell_x + (cell_w - rain_w - 10) / 2
+            _draw_raindrop(d, int(rain_x), y + h - 17)
+            d.text((rain_x + 9, y + h - 19), rain, font=fonts["tiny"], fill=0)
+    d.line((x + half_w, y, x + half_w, y + h), fill=0, width=3)
 
 def minutes_to_hhmm(m):
     if m is None:
@@ -2166,7 +2275,7 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
     pv_fill_gray = 200
     pv_dither_strength = 0.3
 
-    def panel(ts_list, val_list, pv_sum_list, cons_list, x0):
+    def panel(ts_list, val_list, pv_sum_list, cons_list, x0, panel_label):
         n = len(ts_list)
         if n < 2: return
         xs = [x_for_quarter_slot(x0, PW, quarter_slot_index(timestamp))
@@ -2236,8 +2345,8 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
                     fill=255, outline=0, width=2,
                 )
                 logging.info(
-                    "Peak rendering: slot=%d, value=%.1f W, peak_x=%.2f, peak_y=%.2f",
-                    peak_index, peak_watts, peak_x, peak_y,
+                    "Peak %s rendering: slot=%d, value=%.1f W, x=%.2f, y=%.2f",
+                    panel_label.lower(), peak_index, peak_watts, peak_x, peak_y,
                 )
         # Min/Max Labels
         vmin_i, vmax_i = val_list.index(min(val_list)), val_list.index(max(val_list))
@@ -2245,9 +2354,9 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             xi, yi = xs[idx], _price_to_y(val_list[idx])
             d.text((xi-12, yi-12), f"{val_list[idx]/100:.2f}", font=fonts['tiny'], fill=0)
 
-    panel(tl, vl, pv_sum_left, cons_left, X0)
+    panel(tl, vl, pv_sum_left, cons_left, X0, subtitles[0])
     d.line((X0+PW, Y0, X0+PW, Y1), fill=0, width=2)
-    panel(tr, vr, pv_sum_right, cons_right, X0+PW)
+    panel(tr, vr, pv_sum_right, cons_right, X0+PW, subtitles[1])
 
     # Subtitles unter Achse
     d.text((X0+5,    Y1+28), subtitles[0], font=fonts['bold'], fill=0)
@@ -2338,13 +2447,14 @@ def main():
             return default
 
     # Daten parallel vorab laden (API + DB), Display-Update erst am Ende.
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         fut_pi = executor.submit(tibber_priceinfo)
         fut_quarter = executor.submit(tibber_priceinfo_quarter_range)
         fut_consumption = executor.submit(tibber_consumption)
-        fut_weather = executor.submit(fetch_openmeteo_hourly, api_key.LAT, api_key.LON)
-        fut_sun = executor.submit(fetch_openmeteo_sunshine_hours, api_key.LAT, api_key.LON)
-        fut_eco = executor.submit(ecoflow_status_bkw)
+        fut_weather = executor.submit(
+            fetch_openmeteo_forecast,
+            getattr(api_key, "LAT", 0), getattr(api_key, "LON", 0),
+        )
 
         # Daten laden, robust gegen API-Ausfall
         tibber_source = "api"
@@ -2371,38 +2481,24 @@ def main():
             fut_quarter, None, "15-Minuten-Preise konnten nicht geladen werden: %s"
         )
 
-        # EcoFlow-Status früh laden (robust) – damit eco immer definiert ist
-        eco = _future_result(fut_eco, {}, "EcoFlow Status fehlgeschlagen: %s")
-        if eco and ECO_DEBUG:
-            logging.info(
-                "EcoFlow Live-Status: PV=%s W, Grid=%s W, Load=%s W, SoC=%s%%",
-                eco.get('pv_input_w_sum') or eco.get('powGetPvSum'),
-                eco.get('grid_w'),
-                eco.get('load_w'),
-                eco.get('soc')
-            )
-
         consumption = _future_result(
             fut_consumption,
             {"resolution": "hourly", "nodes": []},
             "Tibber Verbrauchsdaten fehlgeschlagen: %s",
         )
-        hourly_map = _future_result(fut_weather, {}, "Wetterdaten konnten nicht geladen werden: %s")
-        sun_today_h, sun_tomorrow_h = _future_result(
-            fut_sun, (None, None), "Sonnenstunden konnten nicht geladen werden: %s"
+        hourly_map, sunshine = _future_result(
+            fut_weather, ({}, (None, None)), "Wetterdaten konnten nicht geladen werden: %s"
         )
+        sun_today_h, sun_tomorrow_h = sunshine
 
-    tomorrow = pi.get("tomorrow", [])
-    if tomorrow:
-        left, right = pi["today"], tomorrow
-        labels = ("Heute", "Morgen")
-        left_date = dt.date.today()
-        right_date = dt.date.today() + dt.timedelta(days=1)
-    else:
-        left, right = (load_cache(CACHE_YESTERDAY) or {"data": []})["data"], pi["today"]
-        labels = ("Gestern", "Heute")
-        left_date = dt.date.today() - dt.timedelta(days=1)
-        right_date = dt.date.today()
+    # Consumption and prices deliberately share the same two complete day
+    # panels.  Tomorrow's prices remain cached by the regular Tibber flow, but
+    # this historical chart is always yesterday versus today.
+    left = (load_cache(CACHE_YESTERDAY) or {"data": []})["data"]
+    right = pi["today"]
+    labels = ("Gestern", "Heute")
+    left_date = dt.date.today() - dt.timedelta(days=1)
+    right_date = dt.date.today()
 
     logging.info(
         "Preis-Slots Quelle: %s, linke Achse=%s (%d Werte), rechte Achse=%s (%d Werte)",
@@ -2470,11 +2566,16 @@ def main():
     cons_left = pd.Series(cons_left_values)
     cons_right = pd.Series(cons_right_values)
 
-    logging.info("Consumption %s: n=%d", labels[0].lower(),
-                 sum(value is not None for value in cons_left_values))
-    logging.info("Consumption %s: n=%d", labels[1].lower(),
-                 sum(value is not None for value in cons_right_values))
-    logging.info("Consumption resolution: %s", consumption_resolution)
+    def log_consumption_summary(label, timestamps):
+        present = [timestamp for timestamp in timestamps if timestamp is not None]
+        logging.info(
+            "Consumption %s: n=%d, resolution=%s, first_timestamp=%s, last_timestamp=%s",
+            label.lower(), len(present), consumption_resolution,
+            present[0].isoformat() if present else "-",
+            present[-1].isoformat() if present else "-",
+        )
+    log_consumption_summary(labels[0], cons_left_times)
+    log_consumption_summary(labels[1], cons_right_times)
 
     def log_consumption_peak(label, timestamps, values):
         valid = [(index, value) for index, value in enumerate(values)
@@ -2504,6 +2605,17 @@ def main():
     global SUN_TODAY, SUN_TOMORROW
     SUN_TODAY = sun_today_h
     SUN_TOMORROW = sun_tomorrow_h
+    weather_days = aggregate_weather_days(hourly_map)
+    for day_name, periods in zip(("today", "tomorrow"), weather_days):
+        for (period_name, _start, _end, _offset), period in zip(WEATHER_PERIODS, periods):
+            icon_name = get_weather_icon_from_bucket(
+                meteo_bucket(period["code"]), period["is_day"]
+            ) if period["code"] is not None else "-"
+            logging.info(
+                "Weather %s %s: temp=%s precipitation=%s code=%s icon=%s",
+                day_name, period_name, period["temperature"],
+                period["precipitation_probability"], period["code"], icon_name,
+            )
 
     pv_left = get_pv_series_db(tl_dt)
     if labels[1] == "Morgen":
@@ -2525,27 +2637,29 @@ def main():
         f_bold  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
         f_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
         f_tiny  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
+        f_temperature = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 19
+        )
     except Exception:
-        f_bold = f_small = f_tiny = ImageFont.load_default()
-    fonts = {'bold': f_bold, 'small': f_small, 'tiny': f_tiny}
+        f_bold = f_small = f_tiny = f_temperature = ImageFont.load_default()
+    fonts = {'bold': f_bold, 'small': f_small, 'tiny': f_tiny,
+             'temperature': f_temperature}
 
     # Layout
     margin = 10
-    top_h  = 70
-    box_w  = (w - margin*3)//2
-    draw_weather_box(
+    top_h = 138
+    draw_weather_dashboard(
         d,
         img,
         margin,
         margin,
-        box_w,
+        w - margin * 2,
         top_h,
         fonts,
-        hourly_map,
+        weather_days,
         sun_today_h=sun_today_h,
         sun_tomorrow_h=sun_tomorrow_h,
     )
-    draw_ecoflow_box(d, margin*2 + box_w, margin, box_w, top_h, fonts, eco)
 
     # Info-Zeile tiefer und zentriert
     draw_info_box(d, info, fonts, y=top_h + margin + 18, width=w-20)
