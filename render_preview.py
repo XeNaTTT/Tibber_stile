@@ -2,9 +2,12 @@
 """Render the weather dashboard and all supplied Image2Lcd assets locally."""
 
 import argparse
+import datetime as dt
 import sys
 import types
 
+import numpy as np
+import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
 # The production module imports the Raspberry Pi display driver at module load
@@ -13,7 +16,7 @@ if "waveshare_epd" not in sys.modules:
     driver_package = types.ModuleType("waveshare_epd")
     driver_package.epd7in5_V2 = types.SimpleNamespace()
     sys.modules["waveshare_epd"] = driver_package
-for optional_dependency in ("requests", "pandas", "numpy"):
+for optional_dependency in ("requests",):
     sys.modules.setdefault(optional_dependency, types.ModuleType(optional_dependency))
 
 import Tibber_stile as dashboard
@@ -54,19 +57,44 @@ def render_dashboard(path):
     dashboard.draw_weather_dashboard(
         draw, image, 10, 10, 780, 164, fonts(), weather_days, 6.4, 3.8
     )
-    sample = types.SimpleNamespace(power_w=153,
-                                   accumulated_consumption_last_hour_kwh=0.1315)
-    dashboard.draw_live_consumption_box(draw, fonts(), sample, 648, 182)
-    draw.text((10, 200), "Display-Preview mit Tibber Pulse",
-              font=fonts()["bold"], fill=0)
-    # A few genuine local interval points on a 96-slot day axis.
-    values = [None] * 96
-    values[52:56] = [145, 164, 151, 172]
-    for slot, value in enumerate(values):
-        if value is not None:
-            x = dashboard.x_for_quarter_slot(10, 780, slot)
-            y = 430 - value * 0.5
-            draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=0)
+    preview_fonts = fonts()
+    info = {
+        "current_price": 28.4,
+        "lowest_today": 17.2,
+        "lowest_today_time": dt.datetime(2026, 9, 20, 3, 0),
+        "highest_today": 42.8,
+    }
+    dashboard.draw_info_box(draw, info, preview_fonts, y=192, width=780)
+
+    day = dt.datetime.now(dashboard.LOCAL_TZ).replace(hour=0, minute=0, second=0,
+                                                       microsecond=0)
+    prices = []
+    tomorrow = []
+    for slot in range(96):
+        stamp = day + dt.timedelta(minutes=15 * slot)
+        price = 0.25 + 0.09 * np.sin((slot - 22) * np.pi / 48)
+        prices.append({"startsAt": stamp.isoformat(), "total": price})
+        tomorrow.append({"startsAt": (stamp + dt.timedelta(days=1)).isoformat(),
+                         "total": price + 0.025})
+    consumption = [None] * 96
+    for slot, value in zip(range(36, 65),
+                           [310, 280, 260, 245, 230, 220, 240, 275, 330, 410,
+                            520, 680, 890, 760, 610, 520, 470, 430, 460, 510,
+                            590, 720, 980, 810, 690, 570, 500, 455, 420]):
+        consumption[slot] = value
+    pv = [max(0, 900 * np.sin((slot - 24) * np.pi / 56)) for slot in range(96)]
+    sample = types.SimpleNamespace(power_w=134,
+                                   accumulated_consumption_last_hour_kwh=0.12)
+    dashboard.draw_two_day_chart(
+        image, draw, prices, tomorrow, preview_fonts, ("Heute", "Morgen"),
+        (10, 222, 790, 410),
+        pv_left={"pv_sum": pd.Series(pv)},
+        pv_right={"pv_sum": pd.Series(pv)},
+        cons_left=pd.Series(consumption, dtype="float64"),
+        cons_right=pd.Series(consumption, dtype="float64"),
+        live_snapshot=sample,
+    )
+    draw.text((10, 470), "Update: Preview", font=preview_fonts["tiny"], fill=0)
     image.save(path)
 
 

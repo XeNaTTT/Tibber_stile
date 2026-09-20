@@ -2225,28 +2225,34 @@ def draw_info_box(d, info, fonts, y, width):
 
 
 def format_live_power(watts):
-    if watts is None or not math.isfinite(float(watts)) or float(watts) < 0:
+    try:
+        watts = float(watts)
+    except (TypeError, ValueError):
         return "-- W"
-    watts = float(watts)
+    if not math.isfinite(watts) or watts < 0:
+        return "-- W"
     return f"{watts / 1000:.2f} kW".replace(".", ",") if watts >= 1000 else f"{watts:.0f} W"
 
 
-def draw_live_consumption_box(d, fonts, snapshot, x, y, w=142, h=62):
-    """Draw the optional Pulse readout over the chart without resizing it."""
-    d.rectangle((x, y, x + w, y + h), fill=255, outline=0, width=2)
-    d.text((x + 7, y + 5), "VERBRAUCH AKTUELL", font=fonts['tiny'], fill=0)
-    power = snapshot.power_w if snapshot is not None else None
-    d.text((x + 7, y + 20), format_live_power(power), font=fonts['bold'], fill=0)
-    last_hour = snapshot.accumulated_consumption_last_hour_kwh if snapshot is not None else None
-    if last_hour is not None and math.isfinite(float(last_hour)) and 0 <= float(last_hour) <= 100:
-        label = f"Stunde  {float(last_hour):.2f} kWh".replace(".", ",")
-        d.text((x + 7, y + 43), label, font=fonts['tiny'], fill=0)
+def format_live_consumption(snapshot):
+    """Return the compact, failure-safe Pulse text used beside the legend."""
+    power = getattr(snapshot, "power_w", None) if snapshot is not None else None
+    label = f"Aktuell: {format_live_power(power)}"
+    last_hour = (getattr(snapshot, "accumulated_consumption_last_hour_kwh", None)
+                 if snapshot is not None else None)
+    try:
+        last_hour = float(last_hour)
+    except (TypeError, ValueError):
+        return label
+    if math.isfinite(last_hour) and 0 <= last_hour <= 100:
+        label += f"  |  Stunde: {last_hour:.2f} kWh".replace(".", ",")
+    return label
 
 
 def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
                        pv_left=None, pv_right=None,
                        cons_left=None, cons_right=None,
-                       cur_dt=None, cur_price=None):
+                       cur_dt=None, cur_price=None, live_snapshot=None):
     PRICE_MIN_CENT = 5
     PRICE_MAX_CENT = 60
 
@@ -2390,14 +2396,13 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
             pv_mask = pv_layer.point(lambda p: 255 if p < 255 else 0)
             pv_dither = _ordered_dither_bayer(pv_layer, matrix=_BAYER_8X8, strength=pv_dither_strength)
             img.paste(pv_dither, (0, 0), pv_mask)
-        # Verbrauch als gut sichtbare Kurve statt als gefuellte Flaeche.
+        # Every genuine consumption interval is a solid black bar.  Sparse
+        # hourly/Pulse data stays sparse: no gaps are connected or filled.
         if cons_points:
-            # Never bridge missing quarters: an hourly value or a Pulse gap
-            # remains a measured point, not an invented higher-resolution line.
-            for segment in _segments_from_points(cons_points):
-                d.line(segment, fill=0, width=3)
+            bar_width = max(2, int(PW / QUARTER_SLOTS_PER_DAY) - 1)
             for point in (point for point in cons_points if point is not None):
-                d.ellipse((point[0] - 2, point[1] - 2, point[0] + 2, point[1] + 2), fill=0)
+                bar_x, bar_y = point
+                d.rectangle((bar_x, bar_y, min(bar_x + bar_width, x0 + PW), Y1), fill=0)
         _draw_price_shadow(xs, val_list)
         # Preis Stufenlinie
         for i in range(n):
@@ -2465,28 +2470,28 @@ def draw_two_day_chart(img, d, left, right, fonts, subtitles, area,
     hour_ticks(tl, X0)
     hour_ticks(tr, X0+PW)
 
-    # Legende Leistung
+    # Legende und Pulse-Livewert bilden eine kompakte gemeinsame Chartzeile.
     legend_y = Y0 - 18
-    legend_x = X1 - 320
-    cursor = legend_x
-    for label, density in (("PV", 0.6),):
-        d.text((cursor, legend_y), label, font=fonts['tiny'], fill=0)
-        label_w, _ = _text_size(d, label, fonts['tiny'])
-        box_x = cursor + label_w + 4
-        _paste_dithered_polygon(
-            img,
-            [(box_x, legend_y + 2), (box_x + 12, legend_y + 2),
-             (box_x + 12, legend_y + 12), (box_x, legend_y + 12)],
-            density=density,
-        )
-        cursor = box_x + 18
-    label = "Verbrauch"
-    d.text((cursor, legend_y), label, font=fonts['tiny'], fill=0)
-    label_w, _ = _text_size(d, label, fonts['tiny'])
-    line_x = cursor + label_w + 4
-    d.line((line_x, legend_y + 7, line_x + 12, legend_y + 7), fill=0, width=3)
-    cursor = line_x + 18
+    cursor = X0 + 4
+    _paste_dithered_polygon(
+        img,
+        [(cursor, legend_y + 2), (cursor + 12, legend_y + 2),
+         (cursor + 12, legend_y + 12), (cursor, legend_y + 12)],
+        density=0.6,
+    )
+    cursor += 17
+    d.text((cursor, legend_y), "PV", font=fonts['tiny'], fill=0)
+    cursor += _text_size(d, "PV", fonts['tiny'])[0] + 15
+    d.rectangle((cursor, legend_y + 2, cursor + 12, legend_y + 12), fill=0)
+    cursor += 17
+    d.text((cursor, legend_y), "Verbrauch", font=fonts['tiny'], fill=0)
+    cursor += _text_size(d, "Verbrauch", fonts['tiny'])[0] + 15
+    d.line((cursor, legend_y + 7, cursor + 14, legend_y + 7), fill=0, width=2)
+    cursor += 19
     d.text((cursor, legend_y), "Preis", font=fonts['tiny'], fill=0)
+    cursor += _text_size(d, "Preis", fonts['tiny'])[0] + 24
+    d.text((cursor, legend_y), format_live_consumption(live_snapshot),
+           font=fonts['tiny'], fill=0)
     if not has_pv:
         d.text((X0 + 6, Y0 + 6), "PV DB leer - keine PV-Linien", font=fonts['tiny'], fill=0)
 
@@ -2781,9 +2786,9 @@ def main():
         img, d, left, right, fonts, labels, chart_area,
         pv_left=pv_left, pv_right=pv_right,
         cons_left=cons_left, cons_right=cons_right,
-        cur_dt=info['current_dt'], cur_price=info['current_price']
+        cur_dt=info['current_dt'], cur_price=info['current_price'],
+        live_snapshot=live_snapshot,
     )
-    draw_live_consumption_box(d, fonts, live_snapshot, w - margin - 142, chart_top - 30)
 
     footer = dt.datetime.now(LOCAL_TZ).strftime("Update: %H:%M %d.%m.%Y")
     d.text((10, h-10), footer, font=fonts['tiny'], fill=0)
