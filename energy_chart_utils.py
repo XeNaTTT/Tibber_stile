@@ -91,3 +91,14 @@ def price_slots_to_quarters(slots, local_tz):
 def format_power_peak(watts):
     """Format a consumption peak compactly for the e-paper chart."""
     return f"{watts / 1000:.2f} kW" if watts >= 1000 else f"{watts:.0f} W"
+
+
+def merge_consumption_series(historical, local):
+    """Overlay genuine local intervals without filling either sparse source."""
+    size = max(len(historical or []), len(local or []), QUARTER_SLOTS_PER_DAY)
+    merged = [None] * size
+    for index in range(size):
+        old = historical[index] if historical is not None and index < len(historical) else None
+        pulse = local[index] if local is not None and index < len(local) else None
+        merged[index] = pulse if pulse is not None else old
+    return merged

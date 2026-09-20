@@ -1,0 +1,5 @@
+numpy
+pandas
+Pillow
+requests>=2.31
+websockets>=17,<18
