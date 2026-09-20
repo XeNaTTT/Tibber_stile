@@ -52,23 +52,25 @@ SUN_TOMORROW = None
 
 # Weather icon config
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-# Older installations kept the C bitmaps in ``Wettersymbole`` while this
-# repository stores them next to the renderer.  Both locations contain the
-# existing assets; no generated/weather-service artwork is needed.
-WEATHER_ICON_DIR = next(
-    (path for path in (
-        os.path.join(PROJECT_DIR, "Wettersymbole"), PROJECT_DIR,
-        "/home/alex/E-Paper-tibber-Preisanzeige/Tibber_stile/Wettersymbole",
-    ) if os.path.isdir(path)),
-    PROJECT_DIR,
-)
-WEATHER_ICON_WIDTH = 240
-WEATHER_ICON_HEIGHT = 235
+# Image2Lcd exports used by the weather dashboard live beside this file.
+WEATHER_ICON_DIR = PROJECT_DIR
 ICON_INVERT = True
 ICON_BITREVERSE = False
 _C_BITMAP_CACHE = {}
 _C_IMAGE_CACHE = {}
 _BIT_REVERSE_TABLE = bytes(int(f"{i:08b}"[::-1], 2) for i in range(256))
+
+WEATHER_ICON_FILES = {
+    "clear_day": "klar_tag_new.c",
+    "clear_night": "klar_nacht_new.c",
+    "partly": "wolkig_new.c",
+    "overcast": "bewoelkt_new.c",
+    "fog": "nebel_new.c",
+    "rain": "regen_new.c",
+    "showers": "schauer_new.c",
+    "thunder": "gewiter_new.c",  # Name of the supplied file (one "t").
+    "snow": "schnee_new.c",
+}
 
 # ---------- Utils ----------
 def _to_float(x):
@@ -160,7 +162,13 @@ def pick(src, keys):
             continue
     return res
 
-def load_c_bitmap(path, varname):
+def load_c_bitmap(path, varname=None):
+    """Read an Image2Lcd C array and return its payload and dimensions.
+
+    The six-byte Image2Lcd header is ``00 01 width-le16 height-le16``.  Rows
+    are MSB-first, one bit per pixel, and padded to a complete byte.  The
+    declaration is parsed instead of deriving the array name from the file.
+    """
     if path in _C_BITMAP_CACHE:
         return _C_BITMAP_CACHE[path]
     try:
@@ -168,16 +176,32 @@ def load_c_bitmap(path, varname):
             content = f.read()
     except Exception as e:
         raise RuntimeError(f"Icon-Datei nicht lesbar: {path}: {e}")
-    if varname not in content:
-        raise RuntimeError(f"Array {varname} nicht gefunden in {path}")
     content = re.sub(r"/\*.*?\*/", "", content, flags=re.S)
     content = re.sub(r"//.*", "", content)
-    bytes_list = [int(b, 16) for b in re.findall(r"0[xX][0-9A-Fa-f]{2}", content)]
+    declaration = re.search(
+        r"(?:const\s+)?unsigned\s+char\s+(\w+)\s*\[\s*(\d+)\s*\]\s*=\s*\{(.*?)\}",
+        content, re.S,
+    )
+    if not declaration:
+        raise RuntimeError(f"Kein unsigned-char-Array gefunden in {path}")
+    array_name, declared_length, array_body = declaration.groups()
+    if varname is not None and array_name != varname:
+        raise RuntimeError(f"Array {varname} nicht gefunden in {path}")
+    bytes_list = [int(b, 16) for b in re.findall(r"0[xX]([0-9A-Fa-f]{2})", array_body)]
     if not bytes_list:
         raise RuntimeError(f"Keine Icon-Daten gefunden in {path}")
-    data = bytes(bytes_list)
-    _C_BITMAP_CACHE[path] = data
-    return data
+    if len(bytes_list) != int(declared_length):
+        raise RuntimeError(f"Arraylänge in {path} ist inkonsistent")
+    if len(bytes_list) < 6 or bytes_list[:2] != [0, 1]:
+        raise RuntimeError(f"Unbekannter Image2Lcd-Header in {path}")
+    width = bytes_list[2] | bytes_list[3] << 8
+    height = bytes_list[4] | bytes_list[5] << 8
+    data = bytes(bytes_list[6:])
+    if len(data) != ((width + 7) // 8) * height:
+        raise RuntimeError(f"Ungültige Bitmap-Datenlänge in {path}")
+    result = (data, width, height, array_name)
+    _C_BITMAP_CACHE[path] = result
+    return result
 
 def c_bitmap_to_image(data, w, h, invert=False, bitreverse=False):
     if bitreverse:
@@ -187,40 +211,36 @@ def c_bitmap_to_image(data, w, h, invert=False, bitreverse=False):
         img = ImageChops.invert(img)
     return img
 
-def get_weather_icon_from_bucket(bucket, is_day):
-    bucket = bucket or "cloudy"
-    if bucket == "clear":
-        return "sun.c"
-    if bucket in ("partly", "cloudy", "overcast", "fog"):
-        return "cloudy.c"
-    if bucket in ("rain", "drizzle", "thunder"):
-        return "rain.c"
-    if bucket == "snow":
-        return "cloudy.c"
-    return "cloudy.c"
+def get_weather_icon_filename(code, is_day):
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return WEATHER_ICON_FILES["overcast"]
+    if code == 0:
+        return WEATHER_ICON_FILES["clear_day" if is_day is not False else "clear_night"]
+    if code in (1, 2):
+        return WEATHER_ICON_FILES["partly"]
+    if code == 3:
+        return WEATHER_ICON_FILES["overcast"]
+    if code in (45, 48):
+        return WEATHER_ICON_FILES["fog"]
+    if code in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67):
+        return WEATHER_ICON_FILES["rain"]
+    if code in (71, 73, 75, 77, 85, 86):
+        return WEATHER_ICON_FILES["snow"]
+    if code in (80, 81, 82):
+        return WEATHER_ICON_FILES["showers"]
+    if code in (95, 96, 99):
+        return WEATHER_ICON_FILES["thunder"]
+    return WEATHER_ICON_FILES["overcast"]
 
-def _get_weather_icon_image(bucket, is_day, invert=False, bitreverse=False):
-    filename = get_weather_icon_from_bucket(bucket, is_day)
+
+def _get_weather_icon_image(code, is_day, invert=False, bitreverse=False):
+    filename = get_weather_icon_filename(code, is_day)
     if not filename:
         return None
     path = os.path.join(WEATHER_ICON_DIR, filename)
-    varname = f"gImage_{os.path.splitext(filename)[0]}"
-    data = load_c_bitmap(path, varname)
-    w = WEATHER_ICON_WIDTH
-    bytes_per_row = (w + 7) // 8
-    if len(data) % bytes_per_row != 0:
-        raise RuntimeError(
-            "Ungültige Icon-Datenlänge: len(data)=%d, bytes_per_row=%d"
-            % (len(data), bytes_per_row)
-        )
-    h = len(data) // bytes_per_row
-    if h < 50 or h > 400:
-        logging.warning(
-            "Auffällige Icon-Höhe berechnet: %d (len(data)=%d, bytes_per_row=%d)",
-            h,
-            len(data),
-            bytes_per_row,
-        )
+    data, w, h, _array_name = load_c_bitmap(path)
     cache_key = (path, w, h, invert, bitreverse)
     if cache_key in _C_IMAGE_CACHE:
         return _C_IMAGE_CACHE[cache_key]
@@ -2057,8 +2077,6 @@ def draw_weather_dashboard(d, img, x, y, w, h, fonts, weather_days,
         d.line((day_x, y + header_h, day_x + half_w, y + header_h), fill=0, width=1)
         for period_index, (label, _start, _end, _offset) in enumerate(WEATHER_PERIODS):
             cell_x = day_x + period_index * cell_w
-            if period_index:
-                d.line((cell_x, y + header_h + 4, cell_x, y + h - 4), fill=0, width=1)
             data = weather_days[day_index][period_index]
             label_w, _ = _text_size(d, label, fonts["tiny"])
             d.text((cell_x + (cell_w - label_w) / 2, y + 29), label,
@@ -2067,22 +2085,21 @@ def draw_weather_dashboard(d, img, x, y, w, h, fonts, weather_days,
             temp_w, _ = _text_size(d, temperature, fonts["temperature"])
             d.text((cell_x + (cell_w - temp_w) / 2, y + 43), temperature,
                    font=fonts["temperature"], fill=0)
-            icon_size = min(48, int(cell_w - 12))
-            icon_x = int(cell_x + (cell_w - icon_size) / 2)
-            icon_y = y + 68
+            icon_x = int(cell_x + (cell_w - 90) / 2)
+            icon_y = y + 60
             icon = None
             if data["code"] is not None:
                 try:
                     icon = _get_weather_icon_image(
-                        meteo_bucket(data["code"]), data["is_day"],
+                        data["code"], data["is_day"],
                         invert=ICON_INVERT, bitreverse=ICON_BITREVERSE,
-                    ).resize((icon_size, icon_size), Image.NEAREST)
+                    )
                 except Exception as exc:
                     logging.warning("Weather-Icon laden fehlgeschlagen: %s", exc)
             if icon is not None:
                 img.paste(icon, (icon_x, icon_y))
             else:
-                draw_weather_icon(d, icon_x, icon_y, icon_size,
+                draw_weather_icon(d, icon_x + 21, icon_y + 20, 48,
                                   data["code"] if data["code"] is not None else 3,
                                   data["is_day"], fill=0)
             rain = ("-- %" if data["precipitation_probability"] is None
@@ -2656,8 +2673,8 @@ def main():
     weather_days = aggregate_weather_days(hourly_map)
     for day_name, periods in zip(("today", "tomorrow"), weather_days):
         for (period_name, _start, _end, _offset), period in zip(WEATHER_PERIODS, periods):
-            icon_name = get_weather_icon_from_bucket(
-                meteo_bucket(period["code"]), period["is_day"]
+            icon_name = get_weather_icon_filename(
+                period["code"], period["is_day"]
             ) if period["code"] is not None else "-"
             logging.info(
                 "Weather %s %s: temp=%s precipitation=%s code=%s icon=%s",
@@ -2695,7 +2712,7 @@ def main():
 
     # Layout
     margin = 10
-    top_h = 138
+    top_h = 164
     draw_weather_dashboard(
         d,
         img,
