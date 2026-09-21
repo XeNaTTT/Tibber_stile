@@ -2,6 +2,7 @@ import datetime as dt
 import sys
 import types
 import unittest
+from unittest import mock
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -19,6 +20,32 @@ if Image is not None:
 
 @unittest.skipIf(Image is None, "Pillow is not installed")
 class CurrentWeatherTests(unittest.TestCase):
+    def test_current_background_mapping(self):
+        cases = (
+            ((0, True, 0), "klar_tag"), ((0, False, 0), "klar_nacht"),
+            ((2, True, 0), "wolkig"), ((3, True, 0), "bewoelkt"),
+            ((61, True, 0), "regen"), ((80, True, 0), "schauer"),
+            ((95, True, 0), "gewitter"), ((71, True, 0), "schnee"),
+            ((45, True, 0), "nebel"), ((0, True, 40), "windig"),
+            ((95, True, 40), "gewitter"),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                self.assertEqual(
+                    expected,
+                    dashboard.get_current_weather_background(*arguments),
+                )
+
+    def test_missing_background_falls_back_without_crashing(self):
+        mapping = {"bewoelkt": "bewoelkt_new.c"}
+        with mock.patch.object(dashboard, "CURRENT_WEATHER_BACKGROUND_FILES",
+                               mapping):
+            image, used = dashboard._get_current_weather_background_image(
+                "windig"
+            )
+        self.assertEqual("bewoelkt", used)
+        self.assertEqual((90, 81), image.size)
+
     def test_current_weather_fields_are_normalized(self):
         current = dashboard._parse_current_weather({"current": {
             "time": "2026-09-20T20:45", "temperature_2m": 17.2,
