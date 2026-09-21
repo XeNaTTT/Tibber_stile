@@ -104,7 +104,7 @@ def render_dashboard(path):
         live_snapshot=sample,
     )
     current_weather = {
-        "time": dt.datetime(2026, 9, 20, 20, 45, tzinfo=dashboard.LOCAL_TZ),
+        "time": dt.datetime(2026, 9, 20, 21, 45, tzinfo=dashboard.LOCAL_TZ),
         "temperature": 17,
         "code": 61,
         "relative_humidity": 88,

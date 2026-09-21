@@ -79,6 +79,26 @@ WEATHER_ICON_FILES = {
     "snow": "schnee_new.c",
 }
 
+# Artwork for the full-height current-conditions panel is deliberately kept
+# separate from WEATHER_ICON_FILES.  The latter remains the icon source for
+# the today/tomorrow forecast.  Only files that actually exist in the
+# repository are listed here; missing weather variants use the fallback in
+# _get_current_weather_background_image().
+CURRENT_WEATHER_BACKGROUND_FILES = {
+    "klar_tag": "klar_tag_new.c",
+    "klar_nacht": "klar_nacht_new.c",
+    "wolkig": "wolkig_new.c",
+    "bewoelkt": "bewoelkt_new.c",
+    "nebel": "nebel_new.c",
+    "regen": "regen_new.c",
+    "schauer": "schauer_new.c",
+    "gewitter": "gewitter_new.c",
+    "schnee": "schnee_new.c",
+}
+WINDY_THRESHOLD_KMH = 35
+CURRENT_WEATHER_BACKGROUND_FALLBACKS = ("bewoelkt", "wolkig")
+_CURRENT_WEATHER_BACKGROUND_CACHE = {}
+
 # The Waveshare 7.5" V2 driver exposes an 800 x 480 canvas.  Keep the panel
 # geometry in one place so all renderers share the same, bounded layout.
 DISPLAY_WIDTH = 800
@@ -263,6 +283,73 @@ def _get_weather_icon_image(code, is_day, invert=False, bitreverse=False):
     img = c_bitmap_to_image(data, w, h, invert=invert, bitreverse=bitreverse)
     _C_IMAGE_CACHE[cache_key] = img
     return img
+
+
+def get_current_weather_background(weather_code, is_day, wind_speed,
+                                   visibility=None):
+    """Return the semantic artwork name for current Open-Meteo conditions.
+
+    Visibility is accepted for future data sources, but Open-Meteo's WMO code
+    already identifies fog and does not reliably distinguish haze here.
+    Consequently no invented visibility threshold selects ``dunst``.
+    """
+    del visibility
+    try:
+        code = int(weather_code)
+    except (TypeError, ValueError):
+        code = None
+
+    if code in (95, 96, 99):
+        return "gewitter"
+    if code in (71, 73, 75, 77, 85, 86):
+        return "schnee"
+    if code in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67):
+        return "regen"
+    if code in (80, 81, 82):
+        return "schauer"
+    if code in (45, 48):
+        return "nebel"
+
+    speed = _as_float_or_none(wind_speed)
+    if speed is not None and speed >= WINDY_THRESHOLD_KMH:
+        return "windig"
+    if code == 0:
+        return "klar_tag" if is_day is not False else "klar_nacht"
+    if code == 1:
+        return "leicht_bewoelkt"
+    if code == 2:
+        return "wolkig"
+    return "bewoelkt"
+
+
+def _get_current_weather_background_image(background_name):
+    """Load current-weather artwork, falling back safely to cloud artwork."""
+    candidates = (background_name,) + CURRENT_WEATHER_BACKGROUND_FALLBACKS
+    attempted = set()
+    for candidate in candidates:
+        if candidate in attempted:
+            continue
+        attempted.add(candidate)
+        filename = CURRENT_WEATHER_BACKGROUND_FILES.get(candidate)
+        if not filename:
+            logging.warning("Current weather background missing: %s", candidate)
+            continue
+        path = os.path.join(WEATHER_ICON_DIR, filename)
+        try:
+            if path not in _CURRENT_WEATHER_BACKGROUND_CACHE:
+                data, width, height, _name = load_c_bitmap(path)
+                _CURRENT_WEATHER_BACKGROUND_CACHE[path] = c_bitmap_to_image(
+                    data, width, height, invert=ICON_INVERT,
+                    bitreverse=ICON_BITREVERSE,
+                )
+            if candidate != background_name:
+                logging.warning("Falling back to %s", candidate)
+            return _CURRENT_WEATHER_BACKGROUND_CACHE[path], candidate
+        except Exception as exc:
+            logging.warning("Current weather background missing: %s (%s)",
+                            candidate, exc)
+    logging.warning("No current weather background available; using white")
+    return None, None
 
 # ---------- Tibber ----------
 def pick_home_with_data(homes):
@@ -2044,49 +2131,28 @@ def _center_text(draw, box, text, font, fill=0):
                top + (bottom - top - text_h) / 2), text, font=font, fill=fill)
 
 
-def draw_current_weather_background(img, area, code, is_day=True):
-    """Draw a sparse 1-bit ink-wash motif, avoiding the central text zones."""
+def draw_current_weather_background(img, area, code, is_day=True,
+                                    wind_speed=None, visibility=None):
+    """Cover the current panel with its 1-bit Image2Lcd artwork."""
     x0, y0, x1, y1 = map(int, area)
-    draw = ImageDraw.Draw(img)
-    bucket = meteo_bucket(code)
-    # Sparse ordered dots at the outer edge suggest pale ink without greys.
-    for y in range(y0 + 12, y0 + 125, 8):
-        for x in range(x1 - 70, x1 - 5, 8):
-            if ((x + 3 * y) // 8) % 7 == 0:
-                draw.point((x, y), fill=0)
-    if bucket == "clear":
-        cx, cy = x1 - 28, y0 + 75
-        draw.arc((cx - 25, cy - 25, cx + 25, cy + 25), 110, 285, fill=0)
-    elif bucket == "fog":
-        for offset in (0, 12, 25, 39):
-            draw.arc((x0 + 12, y0 + 48 + offset, x1 - 8, y0 + 78 + offset),
-                     190, 350, fill=0)
-    else:
-        # Cloud contours remain above and beside the large temperature.
-        draw.arc((x0 + 15, y0 + 63, x0 + 92, y0 + 116), 185, 355, fill=0)
-        draw.arc((x0 + 68, y0 + 45, x1 + 18, y0 + 115), 170, 345, fill=0)
-        if bucket in ("rain", "drizzle", "thunder"):
-            for index in range(5):
-                rx = x1 - 72 + index * 14
-                draw.line((rx, y0 + 122, rx - 7, y0 + 143), fill=0)
-        elif bucket == "snow":
-            for index in range(5):
-                sx, sy = x1 - 70 + index * 14, y0 + 132 + (index % 2) * 9
-                draw.line((sx - 2, sy, sx + 2, sy), fill=0)
-                draw.line((sx, sy - 2, sx, sy + 2), fill=0)
-        if bucket == "thunder":
-            draw.line((x1 - 35, y0 + 116, x1 - 45, y0 + 138,
-                       x1 - 35, y0 + 136, x1 - 48, y0 + 161), fill=0, width=2)
-    if not is_day:
-        draw.arc((x0 + 13, y0 + 34, x0 + 58, y0 + 80), 65, 285, fill=0)
-    # A quiet, discontinuous landscape anchors the bottom without a dark mass.
-    horizon = y1 - 35
-    draw.arc((x0 - 30, horizon - 20, x0 + 95, horizon + 23), 190, 345, fill=0)
-    draw.arc((x0 + 52, horizon - 13, x1 + 25, horizon + 20), 190, 350, fill=0)
-    for tx, height in ((x1 - 48, 26), (x1 - 27, 18), (x0 + 18, 14)):
-        draw.line((tx, y1 - 8, tx, y1 - 8 - height), fill=0)
-        draw.line((tx, y1 - 8 - height, tx - 7, y1 - 1 - height), fill=0)
-        draw.line((tx, y1 - 13 - height, tx + 6, y1 - 7 - height), fill=0)
+    panel_width, panel_height = x1 - x0, y1 - y0
+    background_name = get_current_weather_background(
+        code, is_day, wind_speed, visibility
+    )
+    artwork, used_name = _get_current_weather_background_image(background_name)
+    ImageDraw.Draw(img).rectangle((x0, y0, x1 - 1, y1 - 1), fill=1)
+    if artwork is not None:
+        # Aspect-fill avoids distortion.  NEAREST preserves the source's hard
+        # one-bit edges, then a centred crop fills the complete panel.
+        scale = max(panel_width / artwork.width, panel_height / artwork.height)
+        size = (max(panel_width, round(artwork.width * scale)),
+                max(panel_height, round(artwork.height * scale)))
+        nearest = getattr(Image, "Resampling", Image).NEAREST
+        fitted = artwork.resize(size, nearest)
+        crop_left = max(0, (fitted.width - panel_width) // 2)
+        fitted = fitted.crop((crop_left, 0, crop_left + panel_width, panel_height))
+        img.paste(fitted, (x0, y0))
+    return used_name
 
 
 def draw_current_weather_panel(draw, img, area, fonts, current_weather,
@@ -2099,8 +2165,15 @@ def draw_current_weather_panel(draw, img, area, fonts, current_weather,
         timestamp = timestamp.replace(tzinfo=LOCAL_TZ)
     else:
         timestamp = timestamp.astimezone(LOCAL_TZ)
-    draw_current_weather_background(img, area, weather.get("code"),
-                                    weather.get("is_day", True))
+    draw_current_weather_background(
+        img, area, weather.get("code"), weather.get("is_day", True),
+        weather.get("wind_speed"), weather.get("visibility"),
+    )
+    # A soft-edged, solid-white clearing protects the focal information on a
+    # true monochrome panel without pretending to use transparency.
+    draw.ellipse((x0 - 25, y0 - 12, x1 + 25, y0 + 96), fill=1)
+    draw.ellipse((x0 - 34, y0 + 82, x1 + 30, y0 + 270), fill=1)
+    draw.ellipse((x0 - 28, y0 + 260, x1 + 24, y0 + 382), fill=1)
     inner = (x0 + 8, y0, x1 - 8, y1)
     _center_text(draw, (inner[0], y0 + 14, inner[2], y0 + 37), location,
                  fonts["panel_bold"])
