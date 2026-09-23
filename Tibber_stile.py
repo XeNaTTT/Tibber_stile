@@ -68,36 +68,20 @@ _C_IMAGE_CACHE = {}
 _BIT_REVERSE_TABLE = bytes(int(f"{i:08b}"[::-1], 2) for i in range(256))
 
 WEATHER_ICON_FILES = {
-    "clear_day": "klar_tag_new.c",
-    "clear_night": "klar_nacht_new.c",
-    "partly": "wolkig_new.c",
-    "overcast": "bewoelkt_new.c",
-    "fog": "nebel_new.c",
-    "rain": "regen_new.c",
-    "showers": "schauer_new.c",
-    "thunder": "gewitter_new.c",
-    "snow": "schnee_new.c",
-}
-
-# Artwork for the full-height current-conditions panel is deliberately kept
-# separate from WEATHER_ICON_FILES.  The latter remains the icon source for
-# the today/tomorrow forecast.  Only files that actually exist in the
-# repository are listed here; missing weather variants use the fallback in
-# _get_current_weather_background_image().
-CURRENT_WEATHER_BACKGROUND_FILES = {
-    "klar_tag": "klar_tag_new.c",
-    "klar_nacht": "klar_nacht_new.c",
-    "wolkig": "wolkig_new.c",
-    "bewoelkt": "bewoelkt_new.c",
-    "nebel": "nebel_new.c",
-    "regen": "regen_new.c",
-    "schauer": "schauer_new.c",
-    "gewitter": "gewitter_new.c",
-    "schnee": "schnee_new.c",
+    "sonnig": "sonnig.c",
+    "leicht_bewoelkt": "leicht_bewoelkt.c",
+    "leicht_bewoelkt_nacht": "leicht_bewoelkt_nacht.c",
+    "wolkig": "Wolkig.c",
+    "wolkig_nachts": "wolkig_nachts.c",
+    "bewoelkt_nacht": "bewoelkt_nacht.c",
+    "nebel": "Nebel.c",
+    "niesel": "niesel.c",
+    "regen": "regen.c",
+    "gewitter": "gewitter.c",
+    "gewitter_nacht": "gewitter_nacht.c",
+    "windig": "windig.c",
 }
 WINDY_THRESHOLD_KMH = 35
-CURRENT_WEATHER_BACKGROUND_FALLBACKS = ("bewoelkt", "wolkig")
-_CURRENT_WEATHER_BACKGROUND_CACHE = {}
 
 # The Waveshare 7.5" V2 driver exposes an 800 x 480 canvas.  Keep the panel
 # geometry in one place so all renderers share the same, bounded layout.
@@ -247,109 +231,77 @@ def c_bitmap_to_image(data, w, h, invert=False, bitreverse=False):
         img = ImageChops.invert(img)
     return img
 
-def get_weather_icon_filename(code, is_day):
-    try:
-        code = int(code)
-    except (TypeError, ValueError):
-        return WEATHER_ICON_FILES["overcast"]
-    if code == 0:
-        return WEATHER_ICON_FILES["clear_day" if is_day is not False else "clear_night"]
-    if code in (1, 2):
-        return WEATHER_ICON_FILES["partly"]
-    if code == 3:
-        return WEATHER_ICON_FILES["overcast"]
-    if code in (45, 48):
-        return WEATHER_ICON_FILES["fog"]
-    if code in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67):
-        return WEATHER_ICON_FILES["rain"]
-    if code in (71, 73, 75, 77, 85, 86):
-        return WEATHER_ICON_FILES["snow"]
-    if code in (80, 81, 82):
-        return WEATHER_ICON_FILES["showers"]
-    if code in (95, 96, 99):
-        return WEATHER_ICON_FILES["thunder"]
-    return WEATHER_ICON_FILES["overcast"]
-
-
-def _get_weather_icon_image(code, is_day, invert=False, bitreverse=False):
-    filename = get_weather_icon_filename(code, is_day)
-    if not filename:
-        return None
-    path = os.path.join(WEATHER_ICON_DIR, filename)
-    data, w, h, _array_name = load_c_bitmap(path)
-    cache_key = (path, w, h, invert, bitreverse)
-    if cache_key in _C_IMAGE_CACHE:
-        return _C_IMAGE_CACHE[cache_key]
-    img = c_bitmap_to_image(data, w, h, invert=invert, bitreverse=bitreverse)
-    _C_IMAGE_CACHE[cache_key] = img
-    return img
-
-
-def get_current_weather_background(weather_code, is_day, wind_speed,
-                                   visibility=None):
-    """Return the semantic artwork name for current Open-Meteo conditions.
-
-    Visibility is accepted for future data sources, but Open-Meteo's WMO code
-    already identifies fog and does not reliably distinguish haze here.
-    Consequently no invented visibility threshold selects ``dunst``.
-    """
-    del visibility
+def resolve_weather_icon(weather_code, is_day, wind_speed=None):
+    """Resolve every WMO condition to one of the twelve installed icons."""
     try:
         code = int(weather_code)
     except (TypeError, ValueError):
         code = None
-
+    night = is_day is False
     if code in (95, 96, 99):
-        return "gewitter"
-    if code in (71, 73, 75, 77, 85, 86):
-        return "schnee"
-    if code in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67):
-        return "regen"
-    if code in (80, 81, 82):
-        return "schauer"
-    if code in (45, 48):
-        return "nebel"
+        key = "gewitter_nacht" if night else "gewitter"
+    elif code in (51, 53, 55, 56, 57, 77):
+        key = "niesel"
+    elif code in (61, 63, 65, 66, 67, 71, 73, 75, 80, 81, 82, 85, 86):
+        key = "regen"
+    elif code in (45, 48):
+        key = "nebel"
+    elif (code in (0, 1, 2, 3)
+          and (_as_float_or_none(wind_speed) or 0) >= WINDY_THRESHOLD_KMH):
+        key = "windig"
+    elif code == 0:
+        key = "leicht_bewoelkt_nacht" if night else "sonnig"
+    elif code == 1:
+        key = "leicht_bewoelkt_nacht" if night else "leicht_bewoelkt"
+    elif code == 2:
+        key = "wolkig_nachts" if night else "wolkig"
+    elif code == 3:
+        key = "bewoelkt_nacht" if night else "wolkig"
+    else:
+        key = "wolkig_nachts" if night else "wolkig"
+    return WEATHER_ICON_FILES[key]
 
-    speed = _as_float_or_none(wind_speed)
-    if speed is not None and speed >= WINDY_THRESHOLD_KMH:
-        return "windig"
-    if code == 0:
-        return "klar_tag" if is_day is not False else "klar_nacht"
-    if code == 1:
-        return "leicht_bewoelkt"
-    if code == 2:
-        return "wolkig"
-    return "bewoelkt"
+
+def get_weather_icon_filename(code, is_day, wind_speed=None):
+    """Compatibility entry point; all mapping is owned by the resolver."""
+    return resolve_weather_icon(code, is_day, wind_speed)
 
 
-def _get_current_weather_background_image(background_name):
-    """Load current-weather artwork, falling back safely to cloud artwork."""
-    candidates = (background_name,) + CURRENT_WEATHER_BACKGROUND_FALLBACKS
-    attempted = set()
-    for candidate in candidates:
-        if candidate in attempted:
-            continue
-        attempted.add(candidate)
-        filename = CURRENT_WEATHER_BACKGROUND_FILES.get(candidate)
-        if not filename:
-            logging.warning("Current weather background missing: %s", candidate)
-            continue
+def _fallback_weather_filename(is_day):
+    return WEATHER_ICON_FILES["wolkig_nachts" if is_day is False else "wolkig"]
+
+
+def fit_weather_icon(image, max_width, max_height):
+    """Return a proportionally fitted monochrome icon without cropping."""
+    if image is None or max_width <= 0 or max_height <= 0:
+        return None
+    scale = min(float(max_width) / image.width, float(max_height) / image.height)
+    size = (max(1, int(round(image.width * scale))),
+            max(1, int(round(image.height * scale))))
+    nearest = getattr(Image, "Resampling", Image).NEAREST
+    return image.resize(size, nearest)
+
+
+def _get_weather_icon_image(code, is_day, wind_speed=None, invert=False,
+                            bitreverse=False):
+    """Load the resolved icon, falling back only within the new icon set."""
+    requested = resolve_weather_icon(code, is_day, wind_speed)
+    candidates = (requested, _fallback_weather_filename(is_day))
+    for filename in dict.fromkeys(candidates):
         path = os.path.join(WEATHER_ICON_DIR, filename)
         try:
-            if path not in _CURRENT_WEATHER_BACKGROUND_CACHE:
-                data, width, height, _name = load_c_bitmap(path)
-                _CURRENT_WEATHER_BACKGROUND_CACHE[path] = c_bitmap_to_image(
-                    data, width, height, invert=ICON_INVERT,
-                    bitreverse=ICON_BITREVERSE,
-                )
-            if candidate != background_name:
-                logging.warning("Falling back to %s", candidate)
-            return _CURRENT_WEATHER_BACKGROUND_CACHE[path], candidate
+            data, width, height, _name = load_c_bitmap(path)
+            cache_key = (path, width, height, invert, bitreverse)
+            if cache_key not in _C_IMAGE_CACHE:
+                _C_IMAGE_CACHE[cache_key] = c_bitmap_to_image(
+                    data, width, height, invert=invert, bitreverse=bitreverse)
+            if filename != requested:
+                logging.warning("Weather icon %s unavailable; using %s",
+                                requested, filename)
+            return _C_IMAGE_CACHE[cache_key]
         except Exception as exc:
-            logging.warning("Current weather background missing: %s (%s)",
-                            candidate, exc)
-    logging.warning("No current weather background available; using white")
-    return None, None
+            logging.warning("Weather icon unavailable: %s (%s)", filename, exc)
+    return None
 
 # ---------- Tibber ----------
 def pick_home_with_data(homes):
@@ -2131,73 +2083,56 @@ def _center_text(draw, box, text, font, fill=0):
                top + (bottom - top - text_h) / 2), text, font=font, fill=fill)
 
 
-def draw_current_weather_background(img, area, code, is_day=True,
-                                    wind_speed=None, visibility=None):
-    """Cover the current panel with its 1-bit Image2Lcd artwork."""
-    x0, y0, x1, y1 = map(int, area)
-    panel_width, panel_height = x1 - x0, y1 - y0
-    background_name = get_current_weather_background(
-        code, is_day, wind_speed, visibility
-    )
-    artwork, used_name = _get_current_weather_background_image(background_name)
-    ImageDraw.Draw(img).rectangle((x0, y0, x1 - 1, y1 - 1), fill=1)
-    if artwork is not None:
-        # Aspect-fill avoids distortion.  NEAREST preserves the source's hard
-        # one-bit edges, then a centred crop fills the complete panel.
-        scale = max(panel_width / artwork.width, panel_height / artwork.height)
-        size = (max(panel_width, round(artwork.width * scale)),
-                max(panel_height, round(artwork.height * scale)))
-        nearest = getattr(Image, "Resampling", Image).NEAREST
-        fitted = artwork.resize(size, nearest)
-        crop_left = max(0, (fitted.width - panel_width) // 2)
-        fitted = fitted.crop((crop_left, 0, crop_left + panel_width, panel_height))
-        img.paste(fitted, (x0, y0))
-    return used_name
-
-
 def draw_current_weather_panel(draw, img, area, fonts, current_weather,
                                location=WEATHER_LOCATION):
-    """Render the current conditions panel even when current data is absent."""
-    x0, y0, x1, y1 = area
+    """Render current conditions on white with one standalone modern icon."""
+    x0, y0, x1, y1 = map(int, area)
     weather = current_weather or {}
+    draw.rectangle((x0, y0, x1 - 1, y1 - 1), fill=1)
     timestamp = weather.get("time") or dt.datetime.now(LOCAL_TZ)
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=LOCAL_TZ)
     else:
         timestamp = timestamp.astimezone(LOCAL_TZ)
-    draw_current_weather_background(
-        img, area, weather.get("code"), weather.get("is_day", True),
-        weather.get("wind_speed"), weather.get("visibility"),
-    )
-    # A soft-edged, solid-white clearing protects the focal information on a
-    # true monochrome panel without pretending to use transparency.
-    draw.ellipse((x0 - 25, y0 - 12, x1 + 25, y0 + 96), fill=1)
-    draw.ellipse((x0 - 34, y0 + 82, x1 + 30, y0 + 270), fill=1)
-    draw.ellipse((x0 - 28, y0 + 260, x1 + 24, y0 + 382), fill=1)
     inner = (x0 + 8, y0, x1 - 8, y1)
-    _center_text(draw, (inner[0], y0 + 14, inner[2], y0 + 37), location,
+    _center_text(draw, (inner[0], y0 + 12, inner[2], y0 + 35), location,
                  fonts["panel_bold"])
     weekdays = ("Mo", "Di", "Mi", "Do", "Fr", "Sa", "So")
     date_text = f"{weekdays[timestamp.weekday()]}, {timestamp:%d.%m.%Y}"
-    _center_text(draw, (inner[0], y0 + 39, inner[2], y0 + 59), date_text,
+    _center_text(draw, (inner[0], y0 + 37, inner[2], y0 + 57), date_text,
                  fonts["panel_small"])
-    _center_text(draw, (inner[0], y0 + 61, inner[2], y0 + 82),
+    _center_text(draw, (inner[0], y0 + 58, inner[2], y0 + 78),
                  timestamp.strftime("%H:%M"), fonts["panel_small"])
+
+    icon = _get_weather_icon_image(
+        weather.get("code"), weather.get("is_day", True),
+        weather.get("wind_speed"), invert=ICON_INVERT,
+        bitreverse=ICON_BITREVERSE,
+    )
+    # Bounds derive from the actual panel; the 120px cap leaves generous air.
+    icon_area = (inner[0], y0 + 84, inner[2], min(y0 + 204, y1))
+    fitted = fit_weather_icon(icon, min(120, icon_area[2] - icon_area[0]),
+                              icon_area[3] - icon_area[1])
+    if fitted is not None:
+        icon_x = icon_area[0] + (icon_area[2] - icon_area[0] - fitted.width) // 2
+        icon_y = icon_area[1] + (icon_area[3] - icon_area[1] - fitted.height) // 2
+        img.paste(fitted, (icon_x, icon_y))
+
     temperature = weather.get("temperature")
     temperature_text = "--°" if temperature is None else f"{round(temperature)}°"
-    _center_text(draw, (inner[0], y0 + 113, inner[2], y0 + 205),
+    _center_text(draw, (inner[0], y0 + 208, inner[2], y0 + 276),
                  temperature_text, fonts["panel_temperature"])
     condition = weather_code_text(weather.get("code"))
     condition_font = (fonts["panel_tiny"] if weather.get("code") is None
                       else fonts["panel_condition"])
-    _center_text(draw, (inner[0], y0 + 207, inner[2], y0 + 238), condition,
+    _center_text(draw, (inner[0], y0 + 277, inner[2], y0 + 310), condition,
                  condition_font)
     humidity = weather.get("relative_humidity")
     wind = weather.get("wind_speed")
     humidity_text = "-- %" if humidity is None else f"{round(humidity)} %"
     wind_text = "-- km/h" if wind is None else f"{round(wind)} km/h"
     label_x, value_x = x0 + 17, x0 + 103
-    details_y = y0 + 284
+    details_y = min(y0 + 344, y1 - 95)
     draw.text((label_x, details_y), "Luftfeuchte", font=fonts["panel_tiny"], fill=0)
     draw.text((value_x, details_y), humidity_text, font=fonts["panel_tiny"], fill=0)
     draw.text((label_x, details_y + 27), "Wind", font=fonts["panel_tiny"], fill=0)
@@ -2205,7 +2140,6 @@ def draw_current_weather_panel(draw, img, area, fonts, current_weather,
     direction = wind_direction_text(weather.get("wind_direction"))
     _center_text(draw, (x0 + 25, details_y + 52, x1 - 8, details_y + 76),
                  direction, fonts["panel_small"])
-    # Arrow points towards the bearing; it is intentionally simple for 1-bit.
     degrees = _as_float_or_none(weather.get("wind_direction"))
     if degrees is not None:
         radians = math.radians(degrees - 90)
@@ -2213,117 +2147,6 @@ def draw_current_weather_panel(draw, img, area, fonts, current_weather,
         ex, ey = cx + math.cos(radians) * radius, cy + math.sin(radians) * radius
         draw.line((cx, cy, ex, ey), fill=0, width=2)
         draw.ellipse((ex - 2, ey - 2, ex + 2, ey + 2), fill=0)
-
-
-def draw_weather_icon(draw, x, y, size, code, is_day, fill=0):
-    scale = max(1.0, float(size) / 40.0)
-    width = 2
-    stroke = fill
-
-    def sx(v):
-        return int(round(x + v * scale))
-
-    def sy(v):
-        return int(round(y + v * scale))
-
-    def draw_sun(cx, cy, r):
-        draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=stroke, width=width)
-        for ang in range(0, 360, 45):
-            rad = math.radians(ang)
-            x1 = cx + math.cos(rad) * (r + 4 * scale)
-            y1 = cy + math.sin(rad) * (r + 4 * scale)
-            x2 = cx + math.cos(rad) * (r + 10 * scale)
-            y2 = cy + math.sin(rad) * (r + 10 * scale)
-            draw.line((x1, y1, x2, y2), fill=stroke, width=width)
-
-    def draw_moon(cx, cy, r):
-        draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=stroke, width=width)
-        cut_r = int(r * 0.9)
-        draw.ellipse((cx - cut_r + int(3 * scale), cy - cut_r,
-                      cx + cut_r + int(3 * scale), cy + cut_r), fill=255, outline=255)
-
-    def draw_cloud(cx, cy, w, h):
-        r1 = int(w * 0.22)
-        r2 = int(w * 0.26)
-        r3 = int(w * 0.20)
-        base_y = cy + int(h * 0.55)
-        draw.ellipse((cx - int(w * 0.4), base_y - r1, cx - int(w * 0.4) + 2 * r1,
-                      base_y + r1), outline=stroke, width=width)
-        draw.ellipse((cx - int(w * 0.1), base_y - r2 - int(h * 0.2), cx - int(w * 0.1) + 2 * r2,
-                      base_y + r2 - int(h * 0.2)), outline=stroke, width=width)
-        draw.ellipse((cx + int(w * 0.2), base_y - r3, cx + int(w * 0.2) + 2 * r3,
-                      base_y + r3), outline=stroke, width=width)
-        draw.line((cx - int(w * 0.45), base_y + r1, cx + int(w * 0.55), base_y + r1),
-                  fill=stroke, width=width)
-
-    def draw_rain(cx, cy, w):
-        start_y = cy + int(12 * scale)
-        for offset in (-10, 0, 10):
-            x0 = cx + int(offset * scale)
-            draw.line((x0, start_y, x0 - int(4 * scale), start_y + int(12 * scale)),
-                      fill=stroke, width=width)
-
-    def draw_snow(cx, cy):
-        start_y = cy + int(12 * scale)
-        for offset in (-10, 0, 10):
-            x0 = cx + int(offset * scale)
-            draw.line((x0 - int(3 * scale), start_y - int(3 * scale),
-                       x0 + int(3 * scale), start_y + int(3 * scale)),
-                      fill=stroke, width=width)
-            draw.line((x0 - int(3 * scale), start_y + int(3 * scale),
-                       x0 + int(3 * scale), start_y - int(3 * scale)),
-                      fill=stroke, width=width)
-
-    def draw_lightning(cx, cy):
-        pts = [
-            (cx - int(4 * scale), cy + int(2 * scale)),
-            (cx + int(1 * scale), cy + int(2 * scale)),
-            (cx - int(2 * scale), cy + int(14 * scale)),
-            (cx + int(6 * scale), cy + int(14 * scale)),
-            (cx - int(2 * scale), cy + int(28 * scale)),
-        ]
-        draw.line(pts, fill=stroke, width=width)
-
-    def draw_fog(cx, cy, w):
-        for idx in range(3):
-            y0 = cy + int(idx * 6 * scale)
-            draw.line((cx - int(w * 0.4), y0, cx + int(w * 0.4), y0),
-                      fill=stroke, width=width)
-
-    bucket = meteo_bucket(code)
-    is_day = bool(is_day) if is_day is not None else True
-    center_x = sx(20)
-    center_y = sy(18)
-    cloud_w = int(34 * scale)
-    cloud_h = int(20 * scale)
-
-    if bucket == "clear":
-        if is_day:
-            draw_sun(center_x, center_y, int(8 * scale))
-        else:
-            draw_moon(center_x, center_y, int(8 * scale))
-    elif bucket == "partly":
-        if is_day:
-            draw_sun(sx(14), sy(12), int(7 * scale))
-        else:
-            draw_moon(sx(14), sy(12), int(7 * scale))
-        draw_cloud(sx(20), sy(16), cloud_w, cloud_h)
-    elif bucket == "fog":
-        draw_fog(sx(20), sy(16), cloud_w)
-    elif bucket == "drizzle":
-        draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
-        draw_rain(sx(20), sy(24), cloud_w)
-    elif bucket == "rain":
-        draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
-        draw_rain(sx(20), sy(24), cloud_w)
-    elif bucket == "snow":
-        draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
-        draw_snow(sx(20), sy(24))
-    elif bucket == "thunder":
-        draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
-        draw_lightning(sx(20), sy(20))
-    else:
-        draw_cloud(sx(20), sy(14), cloud_w, cloud_h)
 
 
 def _draw_raindrop(draw, x, y):
@@ -2358,23 +2181,15 @@ def draw_weather_dashboard(d, img, x, y, w, h, fonts, weather_days,
             temp_w, _ = _text_size(d, temperature, fonts["temperature"])
             d.text((cell_x + (cell_w - temp_w) / 2, y + 43), temperature,
                    font=fonts["temperature"], fill=0)
-            icon_x = int(cell_x + (cell_w - 90) / 2)
-            icon_y = y + 60
-            icon = None
-            if data["code"] is not None:
-                try:
-                    icon = _get_weather_icon_image(
-                        data["code"], data["is_day"],
-                        invert=ICON_INVERT, bitreverse=ICON_BITREVERSE,
-                    )
-                except Exception as exc:
-                    logging.warning("Weather-Icon laden fehlgeschlagen: %s", exc)
-            if icon is not None:
-                img.paste(icon, (icon_x, icon_y))
-            else:
-                draw_weather_icon(d, icon_x + 21, icon_y + 20, 48,
-                                  data["code"] if data["code"] is not None else 3,
-                                  data["is_day"], fill=0)
+            icon = _get_weather_icon_image(
+                data["code"], False if period_index == 3 else data["is_day"],
+                invert=ICON_INVERT, bitreverse=ICON_BITREVERSE,
+            )
+            fitted = fit_weather_icon(icon, min(64, int(cell_w) - 8), 58)
+            if fitted is not None:
+                icon_x = int(cell_x + (cell_w - fitted.width) / 2)
+                icon_y = y + 61
+                img.paste(fitted, (icon_x, icon_y))
             rain = ("-- %" if data["precipitation_probability"] is None
                     else f'{data["precipitation_probability"]} %')
             rain_w, _ = _text_size(d, rain, fonts["tiny"])

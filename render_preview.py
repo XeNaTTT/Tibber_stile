@@ -124,22 +124,21 @@ def render_dashboard(path):
 
 def render_asset_sheet(path):
     items = list(dashboard.WEATHER_ICON_FILES.items())
-    image = Image.new("1", (90 * len(items), 110), 1)
+    columns = 6
+    image = Image.new("1", (columns * 120, 2 * 140), 1)
     draw = ImageDraw.Draw(image)
     font = fonts()["tiny"]
     for index, (name, filename) in enumerate(items):
-        bitmap = dashboard._get_weather_icon_image(
-            0 if name.startswith("clear") else {
-                "partly": 2, "overcast": 3, "fog": 45, "rain": 61,
-                "showers": 80, "thunder": 95, "snow": 71,
-            }[name],
-            name != "clear_night",
-            invert=dashboard.ICON_INVERT,
-            bitreverse=dashboard.ICON_BITREVERSE,
-        )
-        image.paste(bitmap, (index * 90, 0))
-        draw.text((index * 90 + 2, 86), filename.removesuffix("_new.c"),
-                  font=font, fill=0)
+        data, width, height, _ = dashboard.load_c_bitmap(
+            dashboard.os.path.join(dashboard.WEATHER_ICON_DIR, filename))
+        bitmap = dashboard.c_bitmap_to_image(
+            data, width, height, invert=dashboard.ICON_INVERT,
+            bitreverse=dashboard.ICON_BITREVERSE)
+        bitmap = dashboard.fit_weather_icon(bitmap, 100, 105)
+        left = (index % columns) * 120
+        top = (index // columns) * 140
+        image.paste(bitmap, (left + (120 - bitmap.width) // 2, top))
+        draw.text((left + 2, top + 108), name, font=font, fill=0)
     image.save(path)
 
 
