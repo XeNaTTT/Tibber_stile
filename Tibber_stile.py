@@ -22,6 +22,7 @@ from tibber_live import (
     load_local_quarter_series,
     store_snapshot,
 )
+from positive_news import refresh_positive_news, split_sentences
 
 ECO_DEBUG = bool(int(os.getenv("ECO_DEBUG", "0")))
 PV_PAT = re.compile(r"(pv|solar|yield|gen|power|input|watt|energy)", re.I)
@@ -2066,16 +2067,6 @@ def weather_code_text(code):
     return "Bewoelkt"
 
 
-def wind_direction_text(degrees):
-    """Convert meteorological degrees to one of eight readable directions."""
-    value = _as_float_or_none(degrees)
-    if value is None:
-        return "--"
-    names = ("Nord", "Nordost", "Ost", "Suedost", "Sued", "Suedwest",
-             "West", "Nordwest")
-    return names[int((value % 360 + 22.5) // 45) % len(names)]
-
-
 def _center_text(draw, box, text, font, fill=0):
     text_w, text_h = _text_size(draw, text, font)
     left, top, right, bottom = box
@@ -2083,9 +2074,105 @@ def _center_text(draw, box, text, font, fill=0):
                top + (bottom - top - text_h) / 2), text, font=font, fill=fill)
 
 
+def wrap_text_to_width(draw, text, font, max_width):
+    """Wrap at word boundaries using Pillow's actual rendered pixel widths."""
+    lines = []
+    for paragraph in (text or "").splitlines() or [""]:
+        words = paragraph.split()
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if not current or _text_size(draw, candidate, font)[0] <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+    return lines
+
+
+def truncate_to_width(draw, text, font, max_width, suffix="..."):
+    """Truncate on a word boundary; the returned value always fits."""
+    if _text_size(draw, text, font)[0] <= max_width:
+        return text
+    words = text.split()
+    while words:
+        candidate = " ".join(words).rstrip(".,;:!?") + suffix
+        if _text_size(draw, candidate, font)[0] <= max_width:
+            return candidate
+        words.pop()
+    return suffix if _text_size(draw, suffix, font)[0] <= max_width else ""
+
+
+def fit_text_lines(draw, text, font, max_width, max_lines):
+    """Wrap to a pixel width and word-truncate the final permitted line."""
+    lines = wrap_text_to_width(draw, text, font, max_width)
+    if len(lines) <= max_lines:
+        return lines
+    kept = lines[:max_lines]
+    kept[-1] = truncate_to_width(draw, kept[-1], font, max_width)
+    if not kept[-1].endswith("..."):
+        kept[-1] = truncate_to_width(draw, kept[-1] + " ...", font, max_width)
+    return kept
+
+
+def _line_height(draw, font):
+    return max(1, _text_size(draw, "Ag", font)[1] + 2)
+
+
+def draw_positive_news(draw, area, fonts, stories):
+    """Render up to three static stories, reducing body content before fonts."""
+    x0, y0, x1, y1 = map(int, area)
+    width = x1 - x0
+    heading_font = fonts.get("news_section", fonts["panel_bold"])
+    headline_font = fonts.get("news_headline", fonts["panel_tiny"])
+    body_font = fonts.get("news_body", fonts["panel_tiny"])
+    source_font = fonts.get("news_source", body_font)
+    draw.text((x0, y0), "GUTE NACHRICHTEN", font=heading_font, fill=0)
+    heading_h = _line_height(draw, heading_font)
+    content_top = y0 + heading_h + 3
+    visible = list(stories or [])[:3]
+    if not visible:
+        draw.text((x0, content_top + 4), "Derzeit keine neuen", font=body_font, fill=0)
+        draw.text((x0, content_top + 4 + _line_height(draw, body_font)),
+                  "Meldungen.", font=body_font, fill=0)
+        return
+
+    slot_h = max(1, (y1 - content_top) // len(visible))
+    headline_lh = _line_height(draw, headline_font)
+    body_lh = _line_height(draw, body_font)
+    source_lh = _line_height(draw, source_font)
+    for index, story in enumerate(visible):
+        slot_top = content_top + index * slot_h
+        slot_bottom = y1 if index == len(visible) - 1 else content_top + (index + 1) * slot_h
+        cursor = slot_top + 2
+        headlines = fit_text_lines(draw, story.get("title", ""), headline_font,
+                                   width, 2)
+        for line in headlines:
+            draw.text((x0, cursor), line, font=headline_font, fill=0)
+            cursor += headline_lh
+
+        source = story.get("source", "").replace("tagesschau/", "tagesschau · ")
+        source_space = source_lh if source else 0
+        available = max(0, slot_bottom - cursor - source_space - 6)
+        max_body_lines = min(4, available // body_lh)
+        sentences = split_sentences(story.get("summary", ""), maximum=3)
+        body = " ".join(sentences)
+        body_lines = fit_text_lines(draw, body, body_font, width, max_body_lines) \
+            if body and max_body_lines else []
+        for line in body_lines:
+            draw.text((x0, cursor), line, font=body_font, fill=0)
+            cursor += body_lh
+        if source and cursor + source_lh <= slot_bottom - 3:
+            draw.text((x0, cursor), source, font=source_font, fill=0)
+        if index < len(visible) - 1:
+            draw.line((x0, slot_bottom - 2, x1, slot_bottom - 2), fill=0, width=1)
+
+
 def draw_current_weather_panel(draw, img, area, fonts, current_weather,
-                               location=WEATHER_LOCATION):
-    """Render current conditions on white with one standalone modern icon."""
+                               news_stories=None, location=WEATHER_LOCATION):
+    """Render compact current conditions and constructive news on white."""
     x0, y0, x1, y1 = map(int, area)
     weather = current_weather or {}
     draw.rectangle((x0, y0, x1 - 1, y1 - 1), fill=1)
@@ -2095,23 +2182,21 @@ def draw_current_weather_panel(draw, img, area, fonts, current_weather,
     else:
         timestamp = timestamp.astimezone(LOCAL_TZ)
     inner = (x0 + 8, y0, x1 - 8, y1)
-    _center_text(draw, (inner[0], y0 + 12, inner[2], y0 + 35), location,
+    _center_text(draw, (inner[0], y0 + 5, inner[2], y0 + 27), location,
                  fonts["panel_bold"])
     weekdays = ("Mo", "Di", "Mi", "Do", "Fr", "Sa", "So")
     date_text = f"{weekdays[timestamp.weekday()]}, {timestamp:%d.%m.%Y}"
-    _center_text(draw, (inner[0], y0 + 37, inner[2], y0 + 57), date_text,
-                 fonts["panel_small"])
-    _center_text(draw, (inner[0], y0 + 58, inner[2], y0 + 78),
-                 timestamp.strftime("%H:%M"), fonts["panel_small"])
+    date_time = f"{date_text} | {timestamp:%H:%M}"
+    _center_text(draw, (inner[0], y0 + 27, inner[2], y0 + 45), date_time,
+                 fonts["panel_tiny"])
 
     icon = _get_weather_icon_image(
         weather.get("code"), weather.get("is_day", True),
         weather.get("wind_speed"), invert=ICON_INVERT,
         bitreverse=ICON_BITREVERSE,
     )
-    # Bounds derive from the actual panel; the 120px cap leaves generous air.
-    icon_area = (inner[0], y0 + 84, inner[2], min(y0 + 204, y1))
-    fitted = fit_weather_icon(icon, min(120, icon_area[2] - icon_area[0]),
+    icon_area = (inner[0], y0 + 48, inner[0] + 62, y0 + 105)
+    fitted = fit_weather_icon(icon, icon_area[2] - icon_area[0],
                               icon_area[3] - icon_area[1])
     if fitted is not None:
         icon_x = icon_area[0] + (icon_area[2] - icon_area[0] - fitted.width) // 2
@@ -2119,34 +2204,26 @@ def draw_current_weather_panel(draw, img, area, fonts, current_weather,
         img.paste(fitted, (icon_x, icon_y))
 
     temperature = weather.get("temperature")
-    temperature_text = "--°" if temperature is None else f"{round(temperature)}°"
-    _center_text(draw, (inner[0], y0 + 208, inner[2], y0 + 276),
-                 temperature_text, fonts["panel_temperature"])
+    temperature_text = "-- °C" if temperature is None else f"{round(temperature)} °C"
+    _center_text(draw, (inner[0] + 64, y0 + 53, inner[2], y0 + 82),
+                 temperature_text, fonts.get("panel_compact_temperature",
+                                              fonts["panel_condition"]))
     condition = weather_code_text(weather.get("code"))
-    condition_font = (fonts["panel_tiny"] if weather.get("code") is None
-                      else fonts["panel_condition"])
-    _center_text(draw, (inner[0], y0 + 277, inner[2], y0 + 310), condition,
+    condition_font = fonts["panel_tiny"]
+    _center_text(draw, (inner[0] + 62, y0 + 81, inner[2], y0 + 104), condition,
                  condition_font)
     humidity = weather.get("relative_humidity")
     wind = weather.get("wind_speed")
     humidity_text = "-- %" if humidity is None else f"{round(humidity)} %"
     wind_text = "-- km/h" if wind is None else f"{round(wind)} km/h"
-    label_x, value_x = x0 + 17, x0 + 103
-    details_y = min(y0 + 344, y1 - 95)
-    draw.text((label_x, details_y), "Luftfeuchte", font=fonts["panel_tiny"], fill=0)
-    draw.text((value_x, details_y), humidity_text, font=fonts["panel_tiny"], fill=0)
-    draw.text((label_x, details_y + 27), "Wind", font=fonts["panel_tiny"], fill=0)
-    draw.text((value_x, details_y + 27), wind_text, font=fonts["panel_tiny"], fill=0)
-    direction = wind_direction_text(weather.get("wind_direction"))
-    _center_text(draw, (x0 + 25, details_y + 52, x1 - 8, details_y + 76),
-                 direction, fonts["panel_small"])
-    degrees = _as_float_or_none(weather.get("wind_direction"))
-    if degrees is not None:
-        radians = math.radians(degrees - 90)
-        cx, cy, radius = x0 + 25, details_y + 64, 9
-        ex, ey = cx + math.cos(radians) * radius, cy + math.sin(radians) * radius
-        draw.line((cx, cy, ex, ey), fill=0, width=2)
-        draw.ellipse((ex - 2, ey - 2, ex + 2, ey + 2), fill=0)
+    details = f"Feuchte {humidity_text} | Wind {wind_text}"
+    details_font = fonts.get("panel_details", fonts["panel_tiny"])
+    compact_details = truncate_to_width(draw, details, details_font,
+                                        inner[2] - inner[0])
+    _center_text(draw, (inner[0], y0 + 108, inner[2], y0 + 128),
+                 compact_details, details_font)
+    draw_positive_news(draw, (inner[0], y0 + 137, inner[2], y1 - 5),
+                       fonts, news_stories)
 
 
 def _draw_raindrop(draw, x, y):
@@ -2625,7 +2702,7 @@ def main():
             return default
 
     # Daten parallel vorab laden (API + DB), Display-Update erst am Ende.
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         fut_pi = executor.submit(tibber_priceinfo)
         fut_quarter = executor.submit(tibber_priceinfo_quarter_range)
         fut_consumption = executor.submit(tibber_consumption)
@@ -2635,6 +2712,9 @@ def main():
             True,
         )
         fut_live = executor.submit(fetch_and_store_live_snapshot)
+        # News shares this normal dashboard run; its cache is fallback, not a
+        # scheduler, and failures can never cancel the display refresh.
+        fut_news = executor.submit(refresh_positive_news)
 
         # Daten laden, robust gegen API-Ausfall
         tibber_source = "api"
@@ -2673,6 +2753,9 @@ def main():
         sun_today_h, sun_tomorrow_h = sunshine
         live_snapshot = _future_result(
             fut_live, None, "Tibber Pulse snapshot failed unexpectedly: %s"
+        )
+        news_stories = _future_result(
+            fut_news, [], "Positive news failed unexpectedly: %s"
         )
 
     # Consumption and prices deliberately share the same two complete day
@@ -2850,15 +2933,42 @@ def main():
         f_panel_condition = ImageFont.truetype(
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18
         )
+        f_panel_compact_temperature = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 21
+        )
+        f_panel_details = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 9
+        )
+        f_news_section = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 11
+        )
+        f_news_headline = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 10
+        )
+        f_news_body = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 9
+        )
+        f_news_source = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf", 8
+        )
     except Exception:
         f_bold = f_small = f_tiny = f_temperature = ImageFont.load_default()
         f_panel_bold = f_panel_small = f_panel_tiny = ImageFont.load_default()
         f_panel_temperature = f_panel_condition = ImageFont.load_default()
+        f_panel_compact_temperature = f_panel_details = ImageFont.load_default()
+        f_news_section = f_news_headline = f_news_body = ImageFont.load_default()
+        f_news_source = ImageFont.load_default()
     fonts = {'bold': f_bold, 'small': f_small, 'tiny': f_tiny,
              'temperature': f_temperature, 'panel_bold': f_panel_bold,
              'panel_small': f_panel_small, 'panel_tiny': f_panel_tiny,
              'panel_temperature': f_panel_temperature,
-             'panel_condition': f_panel_condition}
+             'panel_condition': f_panel_condition,
+             'panel_compact_temperature': f_panel_compact_temperature,
+             'panel_details': f_panel_details,
+             'news_section': f_news_section,
+             'news_headline': f_news_headline,
+             'news_body': f_news_body,
+             'news_source': f_news_source}
 
     # Layout
     margin = 10
@@ -2894,7 +3004,7 @@ def main():
 
     draw_current_weather_panel(
         d, img, (WEATHER_PANEL_X, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT),
-        fonts, current_weather,
+        fonts, current_weather, news_stories,
     )
 
     footer = dt.datetime.now(LOCAL_TZ).strftime("Update: %H:%M %d.%m.%Y")
