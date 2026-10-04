@@ -41,6 +41,12 @@ def fonts():
         "panel_tiny": load_font(base + "DejaVuSans.ttf", 11),
         "panel_temperature": load_font(base + "DejaVuSans.ttf", 67),
         "panel_condition": load_font(base + "DejaVuSans.ttf", 18),
+        "panel_compact_temperature": load_font(base + "DejaVuSans-Bold.ttf", 21),
+        "panel_details": load_font(base + "DejaVuSans.ttf", 9),
+        "news_section": load_font(base + "DejaVuSans-Bold.ttf", 11),
+        "news_headline": load_font(base + "DejaVuSans-Bold.ttf", 10),
+        "news_body": load_font(base + "DejaVuSans.ttf", 9),
+        "news_source": load_font(base + "DejaVuSans-Oblique.ttf", 8),
     }
 
 
@@ -117,6 +123,17 @@ def render_dashboard(path):
         (dashboard.WEATHER_PANEL_X, 0, dashboard.DISPLAY_WIDTH,
          dashboard.DISPLAY_HEIGHT),
         preview_fonts, current_weather,
+        [
+            {"title": "Neue Therapie verbessert Heilungschancen deutlich",
+             "summary": "Ein Forschungsteam hat eine neue Behandlung entwickelt. Erste Ergebnisse zeigen bessere Heilungschancen für Betroffene.",
+             "source": "tagesschau/forschung", "url": "https://example.org/1"},
+            {"title": "Solarenergie erreicht einen neuen Ausbaurekord",
+             "summary": "Im vergangenen Jahr gingen besonders viele neue Anlagen ans Netz. Sie liefern erneuerbaren Strom für zahlreiche Haushalte.",
+             "source": "tagesschau/klima", "url": "https://example.org/2"},
+            {"title": "Sehr lange Überschrift: Schulen entwickeln gemeinsam eine hilfreiche digitale Lernlösung",
+             "summary": "Das Projekt erleichtert den Zugang zu Lernmaterial. Lehrkräfte und Lernende haben die Technik gemeinsam erprobt. Weitere Schulen können sie nun einsetzen.",
+             "source": "DLF Wissen", "url": "https://example.org/3"},
+        ],
     )
     draw.text((10, 470), "Update: Preview", font=preview_fonts["tiny"], fill=0)
     image.save(path)

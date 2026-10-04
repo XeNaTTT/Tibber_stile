@@ -1,6 +1,23 @@
 # Tibber_stile
 Tibber-Anzeige auf einem Waveshare 7.5 Inch E-Paper-Display.
 
+## Konstruktive Nachrichten
+
+Jeder normale Aufruf von `Tibber_stile.py` lädt parallel zu Wetter und
+Energiedaten erneut die konfigurierten RSS-Feeds. Es gibt keinen separaten
+Scheduler. Die editierbare Quellenliste `RSS_SOURCES` liegt in
+`positive_news.py` und enthält die offiziellen Wissen-, Forschung-,
+Technologie- und Klima-Feeds der Tagesschau sowie Deutschlandfunk Wissen.
+
+Die lokale Auswahl bereinigt HTML, entfernt Duplikate anhand der kanonischen
+URL beziehungsweise der normalisierten Überschrift und bewertet Aktualität,
+konstruktive Begriffe, negative Ereignisse und Themenvielfalt. Nur die drei
+ausgewählten Meldungen werden atomar in `positive_news_cache.json` gesichert.
+Die ignorierte Laufzeitdatei dient ausschließlich als Ausfall-Fallback. Sind
+weder RSS-Meldungen noch ein gültiger Cache verfügbar, bleibt der restliche
+Dashboard-Lauf unbeeinträchtigt und die rechte Spalte zeigt einen kurzen
+Hinweis.
+
 ## Tibber Pulse pro Witty-Pi-Lauf
 
 Der Display-Lauf ermittelt das Realtime-Home über
