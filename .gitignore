@@ -9,3 +9,6 @@ tibber_snapshots.db
 /dashboard_preview.png
 /screen_sim.png
 /weather_assets_preview.png
+
+# Runtime JokeAPI state
+/joke_cache.json

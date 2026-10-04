@@ -91,6 +91,16 @@ WEATHER_PANEL_WIDTH = 176  # 22 %, preserving useful space for the charts
 WEATHER_PANEL_X = DISPLAY_WIDTH - WEATHER_PANEL_WIDTH
 MAIN_CONTENT_WIDTH = WEATHER_PANEL_X
 WEATHER_LOCATION = "Berlin"
+JOKE_API_URL = "https://v2.jokeapi.dev/joke/Misc,Pun"
+JOKE_CACHE_FILE = os.path.join(PROJECT_DIR, "joke_cache.json")
+JOKE_MAX_CHARS = 140
+JOKE_MAX_ATTEMPTS = 5
+JOKE_HISTORY_SIZE = 10
+JOKE_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+JOKE_FONT_SIZE = 11
+# This is the existing space below the wind-speed row; panel geometry is fixed.
+JOKE_BOX_WIDTH = WEATHER_PANEL_WIDTH - 16
+JOKE_BOX_HEIGHT = 76
 
 # ---------- Utils ----------
 def _to_float(x):
@@ -117,6 +127,107 @@ def safe_get(d, *path, default=None):
         if d is None: return default
         d = d.get(k)
     return d if d is not None else default
+
+
+def parse_joke_response(payload):
+    """Return JokeAPI text and ID for either supported response format."""
+    if not isinstance(payload, dict) or payload.get("error"):
+        return None, None
+    joke_type = payload.get("type")
+    if joke_type == "single":
+        text = payload.get("joke")
+    elif joke_type == "twopart":
+        setup, delivery = payload.get("setup"), payload.get("delivery")
+        text = f"{setup} {delivery}" if setup and delivery else None
+    else:
+        text = None
+    text = " ".join(text.split()) if isinstance(text, str) else None
+    return (text, payload.get("id")) if text else (None, None)
+
+
+def wrap_text_to_width(draw, text, font, max_width):
+    """Wrap text at word boundaries using Pillow's measured pixel bounds."""
+    lines = []
+    current = ""
+    for word in (text or "").split():
+        candidate = f"{current} {word}".strip()
+        bbox = draw.textbbox((0, 0), candidate, font=font)
+        if current and bbox[2] - bbox[0] > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
+def joke_fits(draw, text, font, max_width=JOKE_BOX_WIDTH,
+              max_height=JOKE_BOX_HEIGHT):
+    """Check both horizontal and vertical fit for wrapped joke text."""
+    lines = wrap_text_to_width(draw, text, font, max_width)
+    if not lines:
+        return False
+    line_heights = []
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        if bbox[2] - bbox[0] > max_width:
+            return False
+        line_heights.append(bbox[3] - bbox[1])
+    return sum(line_heights) + 2 * (len(lines) - 1) <= max_height
+
+
+def _load_joke_cache(cache_file):
+    try:
+        with open(cache_file, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def get_random_short_joke(cache_file=JOKE_CACHE_FILE, session=requests,
+                          max_attempts=JOKE_MAX_ATTEMPTS):
+    """Fetch one fitting safe German joke, falling back without raising."""
+    cache = _load_joke_cache(cache_file)
+    recent_ids = list(cache.get("recent_ids") or [])[-JOKE_HISTORY_SIZE:]
+    try:
+        font = ImageFont.truetype(JOKE_FONT_PATH, JOKE_FONT_SIZE)
+    except OSError:
+        font = ImageFont.load_default()
+    measure = ImageDraw.Draw(Image.new("1", (JOKE_BOX_WIDTH, JOKE_BOX_HEIGHT), 1))
+    params = {
+        "lang": "de",
+        "safe-mode": "",
+        "blacklistFlags": "nsfw,religious,political,racist,sexist,explicit",
+    }
+    for _attempt in range(max_attempts):
+        try:
+            response = session.get(JOKE_API_URL, params=params, timeout=3)
+            response.raise_for_status()
+            text, joke_id = parse_joke_response(response.json())
+        except Exception:
+            logging.info("JokeAPI unavailable, using cached joke")
+            return cache.get("text", "")
+        if text is None or len(text) > JOKE_MAX_CHARS or not joke_fits(
+                measure, text, font):
+            logging.info("JokeAPI: joke too long, retrying")
+            continue
+        if joke_id is not None and joke_id in recent_ids:
+            logging.info("JokeAPI: duplicate joke, retrying")
+            continue
+        if joke_id is not None:
+            recent_ids = (recent_ids + [joke_id])[-JOKE_HISTORY_SIZE:]
+        try:
+            with open(cache_file, "w", encoding="utf-8") as handle:
+                json.dump({"text": text, "id": joke_id,
+                           "recent_ids": recent_ids}, handle, ensure_ascii=False)
+        except OSError as exc:
+            logging.info("JokeAPI: cache could not be updated: %s", exc)
+        logging.info("JokeAPI: fetched joke id %s", joke_id)
+        return text
+    logging.info("JokeAPI unavailable, using cached joke")
+    return cache.get("text", "")
 
 
 def _dump_json(name, obj):
@@ -2084,7 +2195,7 @@ def _center_text(draw, box, text, font, fill=0):
 
 
 def draw_current_weather_panel(draw, img, area, fonts, current_weather,
-                               location=WEATHER_LOCATION):
+                               location=WEATHER_LOCATION, joke_text=""):
     """Render current conditions on white with one standalone modern icon."""
     x0, y0, x1, y1 = map(int, area)
     weather = current_weather or {}
@@ -2137,16 +2248,17 @@ def draw_current_weather_panel(draw, img, area, fonts, current_weather,
     draw.text((value_x, details_y), humidity_text, font=fonts["panel_tiny"], fill=0)
     draw.text((label_x, details_y + 27), "Wind", font=fonts["panel_tiny"], fill=0)
     draw.text((value_x, details_y + 27), wind_text, font=fonts["panel_tiny"], fill=0)
-    direction = wind_direction_text(weather.get("wind_direction"))
-    _center_text(draw, (x0 + 25, details_y + 52, x1 - 8, details_y + 76),
-                 direction, fonts["panel_small"])
-    degrees = _as_float_or_none(weather.get("wind_direction"))
-    if degrees is not None:
-        radians = math.radians(degrees - 90)
-        cx, cy, radius = x0 + 25, details_y + 64, 9
-        ex, ey = cx + math.cos(radians) * radius, cy + math.sin(radians) * radius
-        draw.line((cx, cy, ex, ey), fill=0, width=2)
-        draw.ellipse((ex - 2, ey - 2, ex + 2, ey + 2), fill=0)
+    joke_box = (x0 + 8, details_y + 52, x1 - 8, y1 - 8)
+    joke_font = fonts["panel_tiny"]
+    if joke_text and joke_fits(draw, joke_text, joke_font,
+                               joke_box[2] - joke_box[0],
+                               joke_box[3] - joke_box[1]):
+        line_y = joke_box[1]
+        for line in wrap_text_to_width(draw, joke_text, joke_font,
+                                       joke_box[2] - joke_box[0]):
+            draw.text((joke_box[0], line_y), line, font=joke_font, fill=0)
+            bbox = draw.textbbox((0, 0), line, font=joke_font)
+            line_y += bbox[3] - bbox[1] + 2
 
 
 def _draw_raindrop(draw, x, y):
@@ -2625,7 +2737,7 @@ def main():
             return default
 
     # Daten parallel vorab laden (API + DB), Display-Update erst am Ende.
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         fut_pi = executor.submit(tibber_priceinfo)
         fut_quarter = executor.submit(tibber_priceinfo_quarter_range)
         fut_consumption = executor.submit(tibber_consumption)
@@ -2635,6 +2747,7 @@ def main():
             True,
         )
         fut_live = executor.submit(fetch_and_store_live_snapshot)
+        fut_joke = executor.submit(get_random_short_joke)
 
         # Daten laden, robust gegen API-Ausfall
         tibber_source = "api"
@@ -2674,6 +2787,8 @@ def main():
         live_snapshot = _future_result(
             fut_live, None, "Tibber Pulse snapshot failed unexpectedly: %s"
         )
+        joke_text = _future_result(
+            fut_joke, "", "JokeAPI fehlgeschlagen: %s")
 
     # Consumption and prices deliberately share the same two complete day
     # panels.  Tomorrow's prices remain cached by the regular Tibber flow, but
@@ -2894,7 +3009,7 @@ def main():
 
     draw_current_weather_panel(
         d, img, (WEATHER_PANEL_X, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT),
-        fonts, current_weather,
+        fonts, current_weather, joke_text=joke_text,
     )
 
     footer = dt.datetime.now(LOCAL_TZ).strftime("Update: %H:%M %d.%m.%Y")
