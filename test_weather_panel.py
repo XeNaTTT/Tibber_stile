@@ -1,6 +1,7 @@
 import datetime as dt
 import os
 import sys
+import json
 import tempfile
 import types
 import unittest
@@ -20,6 +21,75 @@ if Image is not None:
 
 @unittest.skipIf(Image is None, "Pillow is not installed")
 class CurrentWeatherTests(unittest.TestCase):
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    def _fonts(self):
+        font = ImageFont.load_default()
+        return {key: font for key in ("panel_bold", "panel_small", "panel_tiny",
+                                       "panel_temperature", "panel_condition")}
+
+    def test_single_and_twopart_joke_parsing_with_unicode(self):
+        self.assertEqual(
+            ("Fröhliche Grüße aus Köln!", 12),
+            dashboard.parse_joke_response({
+                "type": "single", "joke": "Fröhliche Grüße aus Köln!", "id": 12,
+            }),
+        )
+        self.assertEqual(
+            ("Was macht ein Keks? Krümel.", 13),
+            dashboard.parse_joke_response({
+                "type": "twopart", "setup": "Was macht ein Keks?",
+                "delivery": "Krümel.", "id": 13,
+            }),
+        )
+
+    def test_pixel_word_wrapping_and_oversized_rejection(self):
+        draw = ImageDraw.Draw(Image.new("1", (200, 100), 1))
+        font = ImageFont.load_default()
+        lines = dashboard.wrap_text_to_width(
+            draw, "eins zwei drei vier", font,
+            draw.textbbox((0, 0), "eins zwei", font=font)[2],
+        )
+        self.assertEqual("eins zwei drei vier".split(), " ".join(lines).split())
+        self.assertGreater(len(lines), 1)
+        self.assertFalse(dashboard.joke_fits(draw, "Untrennbarlangeswort", font, 5, 50))
+
+    def test_maximum_length_and_recent_id_are_rejected(self):
+        long_joke = "x " * dashboard.JOKE_MAX_CHARS
+        responses = [
+            self.FakeResponse({"type": "single", "joke": long_joke, "id": 1}),
+            self.FakeResponse({"type": "single", "joke": "Doppelt.", "id": 2}),
+            self.FakeResponse({"type": "single", "joke": "Neu und kurz.", "id": 3}),
+        ]
+        session = mock.Mock()
+        session.get.side_effect = responses
+        with tempfile.TemporaryDirectory() as directory:
+            cache = os.path.join(directory, "joke.json")
+            with open(cache, "w", encoding="utf-8") as handle:
+                json.dump({"text": "Alt.", "recent_ids": [2]}, handle)
+            self.assertEqual("Neu und kurz.", dashboard.get_random_short_joke(
+                cache, session=session, max_attempts=3))
+            self.assertEqual(3, session.get.call_count)
+
+    def test_api_failure_uses_cache_or_blank(self):
+        session = mock.Mock()
+        session.get.side_effect = RuntimeError("offline")
+        with tempfile.TemporaryDirectory() as directory:
+            cache = os.path.join(directory, "joke.json")
+            self.assertEqual("", dashboard.get_random_short_joke(cache, session=session))
+            with open(cache, "w", encoding="utf-8") as handle:
+                json.dump({"text": "Zwischengespeichert."}, handle)
+            self.assertEqual("Zwischengespeichert.",
+                             dashboard.get_random_short_joke(cache, session=session))
+
     def test_complete_wmo_icon_mapping(self):
         cases = (
             ((0, True), "sonnig.c"), ((0, False), "leicht_bewoelkt_nacht.c"),
@@ -87,6 +157,35 @@ class CurrentWeatherTests(unittest.TestCase):
             draw, image, (dashboard.WEATHER_PANEL_X, 0, dashboard.DISPLAY_WIDTH,
                           dashboard.DISPLAY_HEIGHT), fonts, None)
         self.assertEqual(1, image.getpixel((dashboard.WEATHER_PANEL_X, 479)))
+
+    def test_wind_direction_is_not_drawn_but_wind_speed_is(self):
+        base = {
+            "temperature": 17, "code": 0, "relative_humidity": 50,
+            "wind_speed": 22, "is_day": True,
+        }
+        images = []
+        for direction in (0, 225):
+            image = Image.new("1", (dashboard.DISPLAY_WIDTH,
+                                     dashboard.DISPLAY_HEIGHT), 1)
+            weather = dict(base, wind_direction=direction)
+            with mock.patch.object(dashboard, "_get_weather_icon_image", return_value=None):
+                dashboard.draw_current_weather_panel(
+                    ImageDraw.Draw(image), image,
+                    (dashboard.WEATHER_PANEL_X, 0, dashboard.DISPLAY_WIDTH,
+                     dashboard.DISPLAY_HEIGHT), self._fonts(), weather,
+                    joke_text="Ein kurzer Witz.")
+            images.append(image)
+        self.assertEqual(images[0].tobytes(), images[1].tobytes())
+        changed_speed = Image.new("1", (dashboard.DISPLAY_WIDTH,
+                                         dashboard.DISPLAY_HEIGHT), 1)
+        with mock.patch.object(dashboard, "_get_weather_icon_image", return_value=None):
+            dashboard.draw_current_weather_panel(
+                ImageDraw.Draw(changed_speed), changed_speed,
+                (dashboard.WEATHER_PANEL_X, 0, dashboard.DISPLAY_WIDTH,
+                 dashboard.DISPLAY_HEIGHT), self._fonts(),
+                dict(base, wind_speed=23, wind_direction=0),
+                joke_text="Ein kurzer Witz.")
+        self.assertNotEqual(images[0].tobytes(), changed_speed.tobytes())
 
 
 if __name__ == "__main__":

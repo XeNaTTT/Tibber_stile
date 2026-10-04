@@ -117,6 +117,7 @@ def render_dashboard(path):
         (dashboard.WEATHER_PANEL_X, 0, dashboard.DISPLAY_WIDTH,
          dashboard.DISPLAY_HEIGHT),
         preview_fonts, current_weather,
+        joke_text="Ich hab gerade den DJ angerufen. Er hat aufgelegt.",
     )
     draw.text((10, 470), "Update: Preview", font=preview_fonts["tiny"], fill=0)
     image.save(path)
